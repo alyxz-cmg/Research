@@ -1,61 +1,78 @@
-### Research Handoff: Synergistic Regularization via Synaptic Balance and Dropout
-**Purpose:** Give a future agent or research collaborator enough context to continue this project, reflecting the recent pivot from neuromorphic SNN efficiency to standard ANN/CNN accuracy and optimization dynamics.
+# Research Handoff: Synaptic Neural Balance in Convolutional Neural Networks
+
+**Purpose:** Give a future agent or research collaborator enough context to continue this project without reconstructing the conversation.
 **Last updated:** 2026-11-17
-**Primary advisor:** Professor Pierre Baldi, UC Irvine. 
+**Primary advisor:** Professor Pierre Baldi, UC Irvine.
 
 ---
 
-#### 1. Core Source Material
-**Original Paper:** Pierre Baldi, Antonios Alexos, Ian Domingo, Alireza Rahmansetayesh. *A Theory of Synaptic Neural Balance: From Local to Global Order* (Artificial Intelligence, 2025).
-*   **The Foundation:** The paper mathematically proves that scaling a neuron's incoming weights by $\lambda$ and outgoing weights by $1/\lambda$ strictly preserves a neural network's input-output function while altering the internal weight norms. 
-*   **The Catalyst for this Project:** While Section 12.4 hypothesizes neuromorphic energy benefits, Sections 11 and 12.2 establish that balancing during training acts as a powerful regularizer that accelerates learning and improves test accuracy. Remark 9.11 explicitly notes that balancing can be interleaved with dropout. 
+## 1. Project History and the Pivot
 
-#### 2. The Original Plan (Neuromorphic Focus)
-Initially, this project focused on **Section 12.4 (Neuromorphic Hardware)**. 
-*   **Goal:** To determine if interleaving neuron-wise $L_2$ synaptic balancing with dropout during training improves the accuracy-versus-energy trade-off when the network is converted to a Spiking Neural Network (SNN).
-*   **Metric:** We tracked Synaptic Operations (SynOps) as a software proxy for hardware energy.
-*   **Hypothesis:** Balancing redistributes internal weight scales, which might synergize with dropout to reduce multi-spike bursting and create sparser, more efficient SNNs.
+### The Original Theory
+This project stems from Baldi et al. (2025), *A Theory of Synaptic Neural Balance: From Local to Global Order*. The core concept is that homogeneous activation functions (like ReLU) permit a function-preserving parameter scaling. Specifically, multiplying incoming weights and biases by a factor $\lambda$ while dividing outgoing weights by $\lambda$ preserves the exact input-output mapping of the network. "Balancing" consists of optimizing these $\lambda$ factors (e.g., via the $L_2$ norm) so that the incoming and outgoing weight costs of each neuron are equal. 
 
-#### 3. The Experiment Performed
-We designed a rigorously controlled $2 \times 2$ factorial pilot to isolate the interaction between balancing and dropout.
-*   **Architecture:** A fully connected `784-256-128-10` ReLU Artificial Neural Network (ANN).
-*   **Dataset:** Real MNIST (50k train, 5k val, 5k calib, 10k test).
-*   **Training:** 60 epochs using stateless SGD (learning rate = 0.001) across 5 independent paired random seeds. 
-*   **Conditions:**
-    *   **Group A (Baseline):** Dropout Off, Balancing Off
-    *   **Group B (Dropout Only):** Hidden Dropout ($p=0.5$), Balancing Off
-    *   **Group C (Balance Only):** Dropout Off, Interleaved $L_2$ Balancing (1 sweep/epoch)
-    *   **Group D (Interaction):** Hidden Dropout ($p=0.5$) + Interleaved $L_2$ Balancing
+### The MLP Proof-of-Concept (Completed)
+Our initial plan was to test whether this balancing operation improved Spiking Neural Network (SNN) efficiency, based on a hypothesis in Section 12.4 of the theory paper. We completed a controlled 2x2 factorial pilot (5 seeds) on a fully connected `784-256-128-10` ReLU network trained on MNIST for 60 epochs.
 
-#### 4. Findings and Results (ANN Focus)
-While we did find significant SNN efficiency improvements, the **standard ANN training dynamics** revealed a major, standalone discovery regarding how balancing alters the optimization trajectory of dropout:
+The experiment was highly successful as a proof-of-concept, producing two main findings:
+1.  **Optimization Interaction:** Balancing fundamentally changed the effect of dropout during standard ANN training. Dropout alone slowed learning and reduced test accuracy by -1.34 percentage points. When interleaved with balancing, this penalty shrank to just -0.20 percentage points (difference-in-differences $+1.15$ percentage points, $p=0.00023$).
+2.  **SNN Operation Proxies:** The interaction carried over to the converted SNNs. The combined balance+dropout condition yielded the lowest hidden SynOps count at $T=50$ (recalibrated thresholds), demonstrating a statistically significant reduction compared to dropout alone while achieving higher test accuracy.
 
-1.  **Acceleration of Learning:** Balancing vastly accelerates early training. By Epoch 30, validation accuracy was +3.39% higher for Balance vs. Baseline, and +5.59% higher for Balance+Dropout vs. Dropout Alone.
-2.  **Mitigation of the Dropout Penalty:** On this architecture, applying $p=0.5$ dropout over 60 epochs was too aggressive and harmed final ANN test accuracy (-1.34% penalty: 89.66% $\to$ 88.32%). However, when dropout was interleaved with balancing, **the network was rescued**. The dropout penalty shrank to just -0.20% (90.85% $\to$ 90.65%). 
-3.  **Statistically Significant Interaction:** The difference-in-differences interaction for ANN test accuracy was **+1.15 percentage points** (Holm-adjusted $p=0.0234$). 
-4.  **Mechanistic Proof:** The balancing operations succeeded perfectly alongside dropout, achieving a normalized balance deficit of $\sim 10^{-6}$ with zero dead neurons and negligible computational overhead (~36 ms total across 60 epochs).
+### The Pivot to CNNs
+Following Professor Baldi's review, we are executing a strategic pivot. The MLP experiments on MNIST served their purpose by validating the mechanics, the dropout interaction, and the optimization trajectory changes. However, claiming a general optimization or energy benefit based solely on a simple, fully connected dataset is insufficient. 
 
-#### 5. The Adjusted Research Plan (ANN / CNN Accuracy Pivot)
-**The Feedback:** Upon reviewing the pilot, Professor Baldi confirmed the results are promising but noted that a 4-layer fully connected network on MNIST is "child's play." Furthermore, calculating SNN efficiency via a software proxy is interesting but ultimately disconnected from physical neuromorphic hardware measurements.
+Furthermore, true SNN energy efficiency claims require hardware-in-the-loop testing, not just software SynOp proxies. Therefore, **we are freezing the SNN conversion aspect as a completed preliminary investigation** and refocusing entirely on standard Artificial Neural Network (ANN) optimization in modern Convolutional Neural Networks (CNNs).
 
-**The Pivot:** We are officially deferring SNN conversion and neuromorphic energy models to a distant final phase. **The primary research question is now focused purely on algorithmic optimization and generalization:** 
-*How does interleaved synaptic balancing interact with dropout to improve accuracy and convergence in modern architectures on complex visual datasets?*
+The new focus is testing whether the optimization and generalization benefits of the balance $\times$ dropout interaction survive the complexity of standard convolutional weight sharing on harder datasets like CIFAR-10.
 
-**New Hypotheses to Test:**
-*   **H1:** The synergistic accuracy interaction between dropout and balancing scales to Convolutional Neural Networks (CNNs).
-*   **H2:** Balancing alters the optimal dropout rate (e.g., allowing for much higher, more aggressive dropout probabilities without hurting convergence).
-*   **H3:** The regularization benefits of the Dropout $\times$ Balance combination yield state-of-the-art performance improvements on harder benchmarks like CIFAR-10 and ImageNet compared to using either method alone.
+---
 
-#### 6. Next Steps Necessary
-To graduate from the "sandbox" to a publication-ready machine learning pipeline, we must execute the following:
+## 2. Theoretical Challenge: CNN Weight Sharing
 
-1.  **Derive and Implement CNN Balancing:**
-    *   Mathematical balancing for standard fully connected layers is $A_j = \sum w_{ij}^2$ and $B_j = \sum w_{jk}^2$. 
-    *   *Action:* We must explicitly define and implement how this translates to 2D convolutions (e.g., balancing per-channel, per-filter, or per-spatial-location) ensuring that the scaling remains function-preserving for the CNN.
-2.  **Scale the Architecture and Dataset:**
-    *   *Action:* Upgrade the PyTorch pipeline from a simple MLP to a standard CNN (e.g., VGG-style or a small ResNet).
-    *   *Action:* Swap the dataset from MNIST to **CIFAR-10**.
-3.  **Run the $2 \times 2$ Grid on CIFAR-10:**
-    *   *Action:* Execute the exact same factorial experiment (Baseline, Dropout, Balance, Both) on the new CNN/CIFAR-10 setup to see if the $+1.15\%$ accuracy interaction holds or widens on a harder task.
-4.  **Hardware / SNN (Deferred):**
-    *   Keep the existing `ConvertedSNN` code archived. It will only be resurrected if we secure access to an actual neuromorphic chip simulator (like Intel Loihi) *after* the CNN math is proven.
+Applying synaptic balance to a CNN is not a trivial copy-paste from the MLP code. Section 8.3 of the original theory paper explicitly warns that standard convolutional weight sharing complicates balancing.
+
+**The Problem:**
+In a fully connected network, you can independently scale a single hidden neuron's incoming and outgoing weights. In a standard CNN, a single convolutional kernel is shared across all spatial locations in a feature map. You cannot balance a single spatial neuron independently without altering the shared kernel, which would disrupt the balance of all other spatial neurons using that same kernel.
+
+**The Solution:**
+The baseline approach for CNNs must be **Coordinated Layer Balancing**. Instead of balancing individual neurons, we must calculate a single shared scaling factor $\lambda$ that balances the entire convolutional layer (or filter channel), preserving the network's function by inversely scaling the subsequent layer's inputs. 
+
+Any implementation must rigorously define:
+1.  Which parameters are scaled (including biases).
+2.  The exact mathematical definition of the incoming and outgoing costs under weight sharing.
+3.  How to handle subsequent layers, particularly if the architecture includes Batch Normalization, residual skip connections, or max pooling.
+
+---
+
+## 3. New Research Hypotheses
+
+*   **H1 (The CNN Interaction):** The synergistic interaction between interleaved synaptic balancing and dropout (where balancing accelerates learning and mitigates dropout's accuracy penalty) generalizes to standard convolutional networks with shared weights.
+*   **H2 (Optimal Dropout):** Interleaved balancing shifts the optimal dropout probability in a CNN, allowing networks to benefit from stronger regularization without suffering severe convergence penalties.
+*   **H3 (Generalization):** These effects persist across more challenging image classification datasets (e.g., CIFAR-10, CIFAR-100) compared to simple benchmarks like MNIST.
+
+---
+
+## 4. Staged Execution Plan
+
+We will follow a strict, staged progression to ensure the mathematics are correct before running large-scale training.
+
+### Stage 1: Mathematical Feasibility & CNN Validation
+*   **Action:** Build a small, sequential CNN architecture. Derive the coordinated layer balancing (or channel-wise balancing) equations. 
+*   **Validation:** Write numerical unit tests verifying that the CNN's logits remain identical (to float32 tolerance) before and after balancing, especially ensuring that biases and spatial pooling operations are handled correctly. 
+*   **Gate:** Do *not* begin training experiments until the CNN balancing operation is mathematically proven and numerically verified.
+
+### Stage 2: The Core CIFAR-10 Factorial Experiment
+*   **Action:** Execute the 2x2 factorial design on CIFAR-10 using the validated sequential CNN.
+    *   Group A: Baseline
+    *   Group B: Dropout Only (at a fixed, pre-specified rate/location)
+    *   Group C: Interleaved Balancing Only
+    *   Group D: Dropout + Interleaved Balancing
+*   **Controls:** Maintain paired seeds (5-8 seeds), identical data splits/augmentation, stateless SGD, and isolated random-number streams for initialization, dropout, and batch shuffling.
+*   **Metrics:** Track training/validation learning curves, generalization gap, and final test accuracy to evaluate the $\Delta_{\text{interaction}}$.
+
+### Stage 3: Mechanistic Controls & Optimal Dropout (H2)
+*   **Action:** Introduce a matched random function-preserving rescaling control. This tests whether the performance gain is explicitly due to finding the "balanced" state, or simply a byproduct of arbitrary weight rescaling.
+*   **Action:** Run a sweep of different dropout probabilities to test H2.
+
+### Stage 4: Scale Up (H3)
+*   **Action:** Only after Stages 1-3 yield robust results, extend the implementation to handle complex architectures (e.g., ResNet, which requires managing skip connections) and train on harder datasets like CIFAR-100 or an ImageNet subset.
