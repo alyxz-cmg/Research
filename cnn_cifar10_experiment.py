@@ -1,40 +1,46 @@
 #!/usr/bin/env python3
 """
-cnn_cifar10_experiment.py (v1.2.3)
+cnn_cifar10_experiment.py (v1.2.4)
 ==================================
 Staged implementation of Synaptic Neural Balance in Convolutional Neural Networks
-following HandOff1.md and Baldi et al. (2025), Sections 8.2, 8.3, 12.2, and Appendix B.
+following HandOff1.md and Baldi et al. (2025), Sections 8.2, 8.3, Remark 9.11,
+Section 12.2, and Appendix B.
 
-Theoretical & Methodological Architecture (v1.2.3):
-  1. Two Balancing Granularities (Baldi et al. Sections 8.2 & 8.3):
-     - `balance_mode="layer"` (Coordinated Layer Balancing, Section 8.3 literal formulation):
-       Uses a single shared scalar multiplier lambda_l > 0 across all neurons/filters in
-       convolutional layer l (5 layer-transition balance constraints in our 6-layer CNN).
-     - `balance_mode="channel"` (Coordinated Filter/Channel Subset Balancing, Section 8.2
-       tied-subset formulation applied to CNN kernels):
-       Treats each output feature map c in layer l as a disjoint tied subset sharing
-       multiplier lambda_{l,c} > 0 across its H_l x W_l spatial neurons (paired with
-       `fc_balance_mode="neuron"`, yielding 32 + 64 + 128 + 128 + 256 = 608 constraints).
-     Both modes preserve exact positive homogeneity through ReLU and channel-wise MaxPool2d
-     because every spatial position within a pooling window receives the same multiplier.
-  2. Two Cost Domains (`--cost-domain {parameter,connection_graph}`):
-     - `parameter`: Minimizes unique trainable parameter squared cost
+Theoretical & Methodological Architecture (v1.2.4):
+  1. Balancing Granularities (Published Baldi et al. 2025, Sections 8.2 & 8.3):
+     - `balance_mode="channel"` paired with `fc_balance_mode="neuron"` (Primary Default,
+       Section 8.3 first CNN-specific approach):
+       Uses one shared scaling factor lambda_{l,c} > 0 for all spatial neurons within
+       each convolutional feature-map channel (filter) c, with a separate multiplier
+       per channel, and independent neuron-wise balancing in the FC hidden layer
+       (32 + 64 + 128 + 128 + 256 = 608 balance constraints).
+       (Note: The second Section 8.3 CNN approach—computing distinct candidate factors
+       per spatial neuron followed by averaging kernel weights—alters the network's
+       forward function and is not implemented here.)
+     - `balance_mode="layer"` paired with `fc_balance_mode="layer"` (Coarser Comparison,
+       Section 8.2 generic tied-layer balancing):
+       Uses one shared scalar multiplier lambda_l > 0 across all channels and spatial
+       positions of hidden layer l (5 layer-transition balance constraints).
+     Both implemented modes preserve exact positive homogeneity through ReLU and
+     channel-wise MaxPool2d because every spatial position within any pooling window
+     receives the identical positive multiplier.
+  2. Cost Domains (`--cost-domain {parameter,connection_graph}`):
+     - `parameter`: Minimizes unique stored trainable parameter squared cost
        R_param(W) = sum_l (||W^(l)||_F^2 + ||b^(l)||_2^2).
-     - `connection_graph`: Minimizes multiplicity-weighted synaptic graph squared cost
-       R_graph(W) (Section 8.2 Eq. 8.1), weighting each kernel tap (u,v) by its exact
-       valid non-padded spatial multiplicity M_l^in(u,v) and bias by H_l * W_l across
-       coordinated Conv-plus-Pool blocks.
-  3. Persisted Stage 1 Verification Report & Hardened Git/Source Provenance:
-     - Writes `stage1_verification_report.json` recording all pass/fail results, float64
-       and float32 logit invariance errors, convergence iterations, and per-transition
-       |log(lam_param) - log(lam_graph)| shifts.
-     - Records `source_script_sha256`, `git_commit_full`, `git_working_tree_dirty`, and
-       supports `--require-clean-git` to guarantee exact commit-to-artifact provenance.
-  4. Strict Stage-Specific Test-Set Discipline:
-     - Stage 2 evaluates the official CIFAR-10 test set only in `full` mode (or with
-       `--allow-nonconfirmatory-test-eval`).
-     - Stage 3 withholds the test set across ALL modes unless `--stage3-confirmatory-test-eval`
-       is explicitly passed (generic override cannot unlock Stage 3 test evaluation).
+     - `connection_graph`: Our expanded connection-graph cost operationalization
+       informed by Baldi et al.'s synaptic balance framework, weighting each shared
+       convolutional kernel tap (u,v) by its exact valid non-padded spatial connection
+       multiplicity M_l^in(u,v) and bias by H_l * W_l across coordinated Conv+Pool blocks.
+  3. Pre-Creation Git Provenance Snapshot & Fault-Tolerant Stage 1 JSON Report:
+     - Captures `initial_git_info = get_git_provenance()` at program startup BEFORE
+       creating any output directories or JSON reports, so tracked `results_cnn_cifar10/`
+       files created during the run never falsely trip `--require-clean-git` or mark
+       the run dirty.
+     - Wraps Stage 1 verification in a `try...except...finally` block so that
+       `stage1_verification_report.json` is written to disk on both pass and failure.
+  4. Per-Layer Cost & Scaling Telemetry:
+     - Logs per-layer parameter and connection-graph squared costs (pre- and post-balance)
+       and applied log-multiplier summaries at every epoch in `stage2_learning_curves.csv`.
 """
 
 import argparse
@@ -59,13 +65,13 @@ import torchvision.transforms as transforms
 
 
 # =============================================================================
-# 1. Configuration, Strict Determinism & Source/Git Provenance Utilities
+# 1. Configuration, Strict Determinism & Pre-Run Git/Source Provenance
 # =============================================================================
 
 def get_git_provenance() -> Dict[str, Any]:
     """
-    Returns full and short git commit hashes plus an explicit boolean indicating
-    whether the working tree has uncommitted modifications.
+    Captures full and short git commit hashes plus working-tree cleanliness.
+    Must be called at startup BEFORE creating any new output directories/files.
     """
     info: Dict[str, Any] = {
         "git_commit_short": "unknown",
@@ -93,6 +99,16 @@ def get_git_provenance() -> Dict[str, Any]:
     return info
 
 
+def enforce_clean_git_if_requested(
+    cfg: "CNNExperimentConfig", git_info: Dict[str, Any]
+) -> None:
+    if cfg.require_clean_git and git_info["git_working_tree_dirty"]:
+        raise RuntimeError(
+            f"Git working tree was dirty at startup ({git_info['git_dirty_files']}) "
+            "and --require-clean-git was specified. Commit your changes before running."
+        )
+
+
 def get_source_script_sha256() -> str:
     """Computes the exact SHA-256 hex digest of this Python script file on disk."""
     try:
@@ -117,14 +133,16 @@ def configure_reproducibility(deterministic: bool = True, warn_only: bool = Fals
 
 @dataclass
 class CNNExperimentConfig:
-    version: str = "1.2.3"
+    version: str = "1.2.4"
     stage: int = 1
     run_mode: str = "smoke"  # "smoke" (seed 42, 5 ep), "pilot" (seeds 43-47, 60 ep), "full" (seeds 48-55, 60 ep)
 
-    # Balancing definitions (Section 8.2 vs. Section 8.3)
-    cost_domain: str = "parameter"        # "parameter" (unique parameter L2) or "connection_graph" (Sec 8.2 Eq. 8.1)
-    balance_mode: str = "layer"           # "layer" (Sec 8.3 whole-layer) or "channel" (Sec 8.2 per-filter tied subset)
-    fc_balance_mode: str = "layer"        # "layer" (whole-layer) or "neuron" (independent FC neuron balance)
+    # Balancing definitions:
+    # - balance_mode="channel" + fc_balance_mode="neuron": Section 8.3 first CNN-specific approach (primary default)
+    # - balance_mode="layer"   + fc_balance_mode="layer":  Section 8.2 generic tied-layer balancing (coarser baseline)
+    cost_domain: str = "parameter"        # "parameter" (unique parameter L2) or "connection_graph" (multiplicity-weighted)
+    balance_mode: str = "channel"         # "channel" (Sec 8.3 CNN per-filter) or "layer" (Sec 8.2 whole-layer)
+    fc_balance_mode: str = "neuron"       # "neuron" (per-FC-neuron) or "layer" (whole-FC-layer)
 
     # Disjoint seed tiers (strictly non-overlapping across smoke, pilot, and confirmatory full runs)
     smoke_seeds: List[int] = field(default_factory=lambda: [42])
@@ -169,6 +187,7 @@ class CNNExperimentConfig:
     full_balance_tol_f32: float = 1e-5
     logit_tol_f64: float = 1e-12
     logit_tol_f32: float = 1e-5
+    graph_ref_tol_f64: float = 1e-9
 
     # Stage 3 Orthogonal 1D Validation Sweeps (conditional 1D slices on validation data)
     conv_dropout_sweep_1d: Tuple[float, ...] = (0.00, 0.10, 0.20, 0.30, 0.40)
@@ -216,8 +235,7 @@ class CNNExperimentConfig:
     def config_fingerprint(self) -> str:
         """
         Computes a deterministic 10-character SHA-256 hex fingerprint over both the
-        complete serialized configuration AND the on-disk script SHA-256, ensuring
-        any code edit or hyperparameter change produces a distinct fingerprint.
+        complete serialized configuration AND the on-disk script SHA-256.
         """
         payload = asdict(self)
         payload["active_seeds"] = self.active_seeds()
@@ -324,7 +342,7 @@ class SequentialCIFARCNN(nn.Module):
     """
     Custom VGG-style sequential ReLU CNN for CIFAR-10 (3x32x32 -> 10 classes).
     Excludes BatchNorm and skip connections so that all hidden layers are positively
-    homogeneous and commute with coordinated layer/channel scaling through MaxPool2d.
+    homogeneous and commute with coordinated channel/layer scaling through MaxPool2d.
 
     Pooling-Block Definition:
       For layers followed by MaxPool2d (`conv2` and `conv4`), the convolution and its
@@ -332,6 +350,15 @@ class SequentialCIFARCNN(nn.Module):
       block: incoming cost is evaluated on the pre-pooling convolutional connections, and
       outgoing cost is evaluated on the post-pooling connections to the next learned layer.
     """
+    LAYER_NAMES: Tuple[str, ...] = ("conv1", "conv2", "conv3", "conv4", "fc1", "fc2")
+    TRANSITION_NAMES: Tuple[str, ...] = (
+        "conv1_to_conv2",
+        "conv2_pool_to_conv3",
+        "conv3_to_conv4",
+        "conv4_pool_to_fc1",
+        "fc1_to_fc2",
+    )
+
     def __init__(
         self,
         in_channels: int = 3,
@@ -460,39 +487,52 @@ def compute_conv2d_spatial_multiplicity(
     return mult, bias_mult
 
 
-def compute_total_l2_regularizer(
+def compute_per_layer_squared_costs(
     model: SequentialCIFARCNN, cost_domain: str = "parameter"
-) -> float:
+) -> Dict[str, float]:
     """
-    Computes the total squared L2 cost R(W) in float64 precision under either:
-      - cost_domain == "parameter": sum of squared unique trainable parameters.
-      - cost_domain == "connection_graph": sum of squared weights over all instantiated
-        connections in the computational graph (weighted by exact spatial reuse multiplicity).
+    Returns a dictionary mapping each layer name (`conv1`..`fc2`) to its exact
+    squared cost (including biases) in float64 under `cost_domain`.
     """
     if cost_domain not in ("parameter", "connection_graph"):
         raise ValueError(f"Unknown cost_domain: {cost_domain}")
 
-    total = 0.0
+    per_layer: Dict[str, float] = {}
     conv_idx = 0
     with torch.no_grad():
-        for layer in model.param_layers:
+        for l_name, layer in zip(SequentialCIFARCNN.LAYER_NAMES, model.param_layers):
             w = layer.weight.detach().double()
             b = layer.bias.detach().double() if layer.bias is not None else None
 
             if cost_domain == "parameter" or isinstance(layer, nn.Linear):
-                total += float(w.pow(2).sum().item())
+                val = float(w.pow(2).sum().item())
                 if b is not None:
-                    total += float(b.pow(2).sum().item())
+                    val += float(b.pow(2).sum().item())
             elif isinstance(layer, nn.Conv2d):
                 h_in, w_in, h_out, w_out = model.conv_spatial_shapes[conv_idx]
                 mult_uv, bias_mult = compute_conv2d_spatial_multiplicity(
                     layer, h_in, w_in, h_out, w_out, device=w.device
                 )
-                total += float((w.pow(2) * mult_uv.view(1, 1, *mult_uv.shape)).sum().item())
+                val = float((w.pow(2) * mult_uv.view(1, 1, *mult_uv.shape)).sum().item())
                 if b is not None:
-                    total += float((b.pow(2) * bias_mult).sum().item())
+                    val += float((b.pow(2) * bias_mult).sum().item())
                 conv_idx += 1
-    return total
+            else:
+                raise TypeError(f"Unsupported layer type: {type(layer)}")
+            per_layer[l_name] = val
+    return per_layer
+
+
+def compute_total_l2_regularizer(
+    model: SequentialCIFARCNN, cost_domain: str = "parameter"
+) -> float:
+    """
+    Computes the total squared L2 cost R(W) in float64 precision under either:
+      - cost_domain == "parameter": sum of squared unique stored parameters.
+      - cost_domain == "connection_graph": sum of squared weights over all instantiated
+        connections in the computational graph (weighted by exact spatial reuse multiplicity).
+    """
+    return float(sum(compute_per_layer_squared_costs(model, cost_domain=cost_domain).values()))
 
 
 def _get_unit_costs(
@@ -671,8 +711,8 @@ def _compute_single_domain_diagnostics(
 
 def compute_cnn_balance_diagnostics(
     model: SequentialCIFARCNN,
-    conv_mode: str = "layer",
-    fc_mode: str = "layer",
+    conv_mode: str = "channel",
+    fc_mode: str = "neuron",
     cost_domain: str = "parameter",
     eps: float = 1e-12,
 ) -> Dict[str, float]:
@@ -708,8 +748,8 @@ def compute_cnn_balance_diagnostics(
 
 def partial_balance_cnn_once(
     model: SequentialCIFARCNN,
-    conv_mode: str = "layer",
-    fc_mode: str = "layer",
+    conv_mode: str = "channel",
+    fc_mode: str = "neuron",
     cost_domain: str = "parameter",
     eps: float = 1e-12,
 ) -> List[torch.Tensor]:
@@ -739,8 +779,8 @@ def partial_balance_cnn_once(
 
 def full_balance_cnn_until_convergence(
     model: SequentialCIFARCNN,
-    conv_mode: str = "layer",
-    fc_mode: str = "layer",
+    conv_mode: str = "channel",
+    fc_mode: str = "neuron",
     cost_domain: str = "parameter",
     eps: float = 1e-12,
     tol: float = 1e-7,
@@ -770,10 +810,11 @@ def apply_matched_random_rescaling_cnn(
     model: SequentialCIFARCNN,
     reference_log_lambdas: List[torch.Tensor],
     rng: torch.Generator,
-    conv_mode: str = "layer",
-    fc_mode: str = "layer",
-) -> None:
+    conv_mode: str = "channel",
+    fc_mode: str = "neuron",
+) -> List[torch.Tensor]:
     layers = model.param_layers
+    applied_random_logs: List[torch.Tensor] = []
     with torch.no_grad():
         for idx, ref_log_lam in enumerate(reference_log_lambdas):
             curr_l = layers[idx]
@@ -791,6 +832,8 @@ def apply_matched_random_rescaling_cnn(
             random_log_lam = shuffled * signs.double()
             lambdas = torch.exp(random_log_lam)
             _apply_scaling_to_layer_pair(curr_l, next_l, lambdas, mode, model.final_spatial)
+            applied_random_logs.append(random_log_lam.detach().cpu())
+    return applied_random_logs
 
 
 # =============================================================================
@@ -1077,11 +1120,11 @@ def prepare_cifar10_splits(cfg: CNNExperimentConfig):
 
 
 # =============================================================================
-# 6. Stage 1 Verification Gate: Mathematical & Numerical Unit Tests + JSON Report
+# 6. Stage 1 Verification Gate: Fault-Tolerant Unit Tests + JSON Report
 # =============================================================================
 
 def _brute_force_conv2d_graph_cost_reference(
-    conv_layer: nn.Conv2d, h_in: int, w_in: int
+    conv_layer: nn.Conv2d, h_in: int, w_in: int, tol: float = 1e-9
 ) -> Tuple[float, int, int]:
     w = conv_layer.weight.detach().double().cpu()
     b = conv_layer.bias.detach().double().cpu() if conv_layer.bias is not None else None
@@ -1126,7 +1169,7 @@ def _brute_force_conv2d_graph_cost_reference(
     )
     unfold_mult = unfolded.sum(dim=2).view(kh, kw)
     unfold_total = float((per_tap_sq_sum * unfold_mult).sum().item()) + bias_sq_sum * (h_out * w_out)
-    assert abs(explicit_total - unfold_total) < 1e-9, (
+    assert abs(explicit_total - unfold_total) < tol, (
         f"Brute-force vs. unfold mismatch: {explicit_total} vs {unfold_total}"
     )
     return explicit_total, h_out, w_out
@@ -1135,450 +1178,474 @@ def _brute_force_conv2d_graph_cost_reference(
 def run_stage1_verification_tests(
     cfg: Optional[CNNExperimentConfig] = None,
     save_report_path: Optional[str] = None,
+    initial_git_info: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     """
     Executes the 5 mandatory Stage 1 verification unit tests and writes a structured
-    JSON verification artifact (`stage1_verification_report.json`) to disk.
+    JSON verification artifact (`stage1_verification_report.json`) to disk in a
+    `finally` block so that both pass and failure details are preserved.
     """
     if cfg is None:
         cfg = CNNExperimentConfig()
+    if initial_git_info is None:
+        initial_git_info = get_git_provenance()
+
+    enforce_clean_git_if_requested(cfg, initial_git_info)
 
     print("=" * 86)
-    print("STAGE 1 GATE: MATHEMATICAL FEASIBILITY & NUMERICAL INVARIANCE UNIT TESTS (v1.2.3)")
+    print("STAGE 1 GATE: MATHEMATICAL FEASIBILITY & NUMERICAL INVARIANCE UNIT TESTS (v1.2.4)")
     print("=" * 86)
 
-    git_info = get_git_provenance()
     report: Dict[str, Any] = {
         "script_version": cfg.version,
         "source_script_sha256": get_source_script_sha256(),
-        "git_provenance": git_info,
+        "config_fingerprint": cfg.config_fingerprint(),
+        "git_provenance": initial_git_info,
         "timestamp_utc": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
         "test1a_logit_invariance": [],
-        "test1b_active_dropout_invariance_max_diff": 0.0,
+        "test1b_active_dropout_invariance_max_diff": None,
         "test2a_per_transition_multiplier_diffs": {},
         "test2b_monotonic_convergence": [],
         "test3_eligibility_accounting": {},
         "test4_rng_and_policy_checks": {},
         "test5_statistical_pipeline_checks": {},
         "all_passed": False,
+        "failed_test": None,
+        "error_type": None,
+        "error_message": None,
     }
 
-    mode_combinations = [
-        ("parameter", "layer", "layer"),
-        ("parameter", "layer", "neuron"),
-        ("parameter", "channel", "layer"),
-        ("parameter", "channel", "neuron"),
-        ("connection_graph", "layer", "layer"),
-        ("connection_graph", "layer", "neuron"),
-        ("connection_graph", "channel", "layer"),
-        ("connection_graph", "channel", "neuron"),
-    ]
+    current_test_section = "startup"
+    try:
+        mode_combinations = [
+            ("parameter", "layer", "layer"),
+            ("parameter", "layer", "neuron"),
+            ("parameter", "channel", "layer"),
+            ("parameter", "channel", "neuron"),
+            ("connection_graph", "layer", "layer"),
+            ("connection_graph", "layer", "neuron"),
+            ("connection_graph", "channel", "layer"),
+            ("connection_graph", "channel", "neuron"),
+        ]
 
-    for cost_dom, conv_m, fc_m in mode_combinations:
-        rng_streams = IsolatedRNGStreams.from_seed(101)
-        model_f64 = SequentialCIFARCNN(
-            in_channels=3, spatial_size=16, conv_channels=(8, 16, 16, 32),
-            fc_hidden=24, num_classes=10, use_dropout=False
-        ).double()
-        model_f64.reset_parameters_with_generator(rng_streams.gen_init)
-        model_f64.eval()
-
-        x_f64 = torch.randn(6, 3, 16, 16, generator=rng_streams.gen_loader, dtype=torch.float64)
-        with torch.no_grad():
-            logits_before_f64 = model_f64(x_f64).clone()
-            partial_balance_cnn_once(
-                model_f64, conv_mode=conv_m, fc_mode=fc_m, cost_domain=cost_dom
-            )
-            logits_after_partial_f64 = model_f64(x_f64).clone()
-            conv_diag64 = full_balance_cnn_until_convergence(
-                model_f64, conv_mode=conv_m, fc_mode=fc_m, cost_domain=cost_dom,
-                tol=cfg.full_balance_tol_f64, max_iters=cfg.full_balance_max_iters
-            )
-            logits_after_full_f64 = model_f64(x_f64).clone()
-
-        assert conv_diag64["converged"], (
-            f"Float64 convergence failed for ({cost_dom}, {conv_m}, {fc_m}): "
-            f"max deficit = {conv_diag64['norm_deficit_eligible_max']}"
-        )
-        diff_partial_f64 = float((logits_before_f64 - logits_after_partial_f64).abs().max().item())
-        diff_full_f64 = float((logits_before_f64 - logits_after_full_f64).abs().max().item())
-        assert diff_partial_f64 < cfg.logit_tol_f64, f"Float64 partial invariance failed: {diff_partial_f64}"
-        assert diff_full_f64 < cfg.logit_tol_f64, f"Float64 full invariance failed: {diff_full_f64}"
-
-        rng_streams32 = IsolatedRNGStreams.from_seed(202)
-        model_f32 = SequentialCIFARCNN(
-            in_channels=3, spatial_size=32, conv_channels=(16, 32, 64, 64),
-            fc_hidden=64, num_classes=10, use_dropout=False
-        ).float()
-        model_f32.reset_parameters_with_generator(rng_streams32.gen_init)
-        model_f32.eval()
-
-        x_f32 = torch.randn(8, 3, 32, 32, generator=rng_streams32.gen_loader, dtype=torch.float32)
-        with torch.no_grad():
-            logits_before_f32 = model_f32(x_f32).clone()
-            conv_diag32 = full_balance_cnn_until_convergence(
-                model_f32, conv_mode=conv_m, fc_mode=fc_m, cost_domain=cost_dom,
-                tol=cfg.full_balance_tol_f32, max_iters=cfg.full_balance_max_iters
-            )
-            logits_after_f32 = model_f32(x_f32).clone()
-
-        assert conv_diag32["converged"], (
-            f"Float32 convergence failed for ({cost_dom}, {conv_m}, {fc_m}): "
-            f"max deficit = {conv_diag32['norm_deficit_eligible_max']}"
-        )
-        diff_f32 = float((logits_before_f32 - logits_after_f32).abs().max().item())
-        assert diff_f32 < cfg.logit_tol_f32, (
-            f"Float32 invariance failed ({diff_f32:.2e} >= {cfg.logit_tol_f32:.2e})"
-        )
-        report["test1a_logit_invariance"].append({
-            "cost_domain": cost_dom,
-            "conv_mode": conv_m,
-            "fc_mode": fc_m,
-            "f64_partial_max_diff": diff_partial_f64,
-            "f64_full_max_diff": diff_full_f64,
-            "f32_full_max_diff": diff_f32,
-            "f64_iterations": int(conv_diag64["iterations"]),
-            "f32_iterations": int(conv_diag32["iterations"]),
-        })
-        print(
-            f"[PASS] Test 1a ({cost_dom:16s} | conv={conv_m:7s} | fc={fc_m:6s}): "
-            f"f64 diff={diff_full_f64:.2e}, f32 diff={diff_f32:.2e} "
-            f"(iters={conv_diag64['iterations']})"
-        )
-
-    max_drop_diff = 0.0
-    for drop_mode in ["elementwise", "channel"]:
+        current_test_section = "Test 1a: Logit Invariance (f64 & f32)"
         for cost_dom, conv_m, fc_m in mode_combinations:
-            rng_d1 = IsolatedRNGStreams.from_seed(777)
-            rng_d2 = IsolatedRNGStreams.from_seed(777)
-            model_drop = SequentialCIFARCNN(
-                in_channels=3, spatial_size=16, conv_channels=(8, 16, 16, 32),
-                fc_hidden=24, num_classes=10, use_dropout=True, conv_dropout_mode=drop_mode
-            ).double()
-            model_drop.reset_parameters_with_generator(rng_d1.gen_init)
-            model_drop.train()
-            x_d = torch.randn(4, 3, 16, 16, generator=rng_d1.gen_loader, dtype=torch.float64)
-            with torch.no_grad():
-                out_drop_before = model_drop(x_d, dropout_rng=rng_d1.gen_dropout).clone()
-                partial_balance_cnn_once(
-                    model_drop, conv_mode=conv_m, fc_mode=fc_m, cost_domain=cost_dom
-                )
-                out_drop_after = model_drop(x_d, dropout_rng=rng_d2.gen_dropout).clone()
-            diff_drop = float((out_drop_before - out_drop_after).abs().max().item())
-            max_drop_diff = max(max_drop_diff, diff_drop)
-            assert diff_drop < cfg.logit_tol_f64, (
-                f"Fixed-mask dropout invariance failed ({drop_mode}, {cost_dom}, {conv_m}, {fc_m}): {diff_drop}"
-            )
-    report["test1b_active_dropout_invariance_max_diff"] = max_drop_diff
-    print(
-        "[PASS] Test 1b (Active Dropout Fixed-Mask Invariance): Verified across all 8 balance modes "
-        "x 2 dropout modes"
-    )
-
-    test_conv_specs = [
-        {"kernel_size": 3, "padding": 0, "stride": 1, "dilation": 1, "h_in": 10, "w_in": 12},
-        {"kernel_size": 3, "padding": 1, "stride": 1, "dilation": 1, "h_in": 16, "w_in": 16},
-        {"kernel_size": 3, "padding": 1, "stride": 2, "dilation": 1, "h_in": 15, "w_in": 15},
-        {"kernel_size": 3, "padding": 2, "stride": 1, "dilation": 2, "h_in": 14, "w_in": 14},
-    ]
-    g_ref = torch.Generator(device="cpu").manual_seed(909)
-    for spec in test_conv_specs:
-        conv_test = nn.Conv2d(
-            2, 3,
-            kernel_size=spec["kernel_size"],
-            padding=spec["padding"],
-            stride=spec["stride"],
-            dilation=spec["dilation"],
-            bias=True,
-        ).double()
-        with torch.no_grad():
-            conv_test.weight.copy_(torch.randn(conv_test.weight.shape, generator=g_ref, dtype=torch.float64))
-            conv_test.bias.copy_(torch.randn(conv_test.bias.shape, generator=g_ref, dtype=torch.float64))
-
-        ref_cost, h_out, w_out = _brute_force_conv2d_graph_cost_reference(
-            conv_test, spec["h_in"], spec["w_in"]
-        )
-        mult_uv, bias_mult = compute_conv2d_spatial_multiplicity(
-            conv_test, spec["h_in"], spec["w_in"], h_out, w_out, device=torch.device("cpu")
-        )
-        our_cost = float(
-            (conv_test.weight.pow(2) * mult_uv.view(1, 1, *mult_uv.shape)).sum().item()
-            + (conv_test.bias.pow(2) * bias_mult).sum().item()
-        )
-        assert abs(ref_cost - our_cost) < 1e-9, (
-            f"Multiplicity graph cost mismatch for {spec}: ref={ref_cost} vs our={our_cost}"
-        )
-
-    rng_net_ref = IsolatedRNGStreams.from_seed(910)
-    net_ref = SequentialCIFARCNN(
-        in_channels=3, spatial_size=16, conv_channels=(4, 6, 8, 8), fc_hidden=12, num_classes=10
-    ).double()
-    net_ref.reset_parameters_with_generator(rng_net_ref.gen_init)
-    indep_net_graph_cost = 0.0
-    for idx_c, conv_l in enumerate([net_ref.conv1, net_ref.conv2, net_ref.conv3, net_ref.conv4]):
-        h_in, w_in, _, _ = net_ref.conv_spatial_shapes[idx_c]
-        c_cost, _, _ = _brute_force_conv2d_graph_cost_reference(conv_l, h_in, w_in)
-        indep_net_graph_cost += c_cost
-    for fc_l in [net_ref.fc1, net_ref.fc2]:
-        indep_net_graph_cost += float(fc_l.weight.pow(2).sum().item() + fc_l.bias.pow(2).sum().item())
-    our_net_graph_cost = compute_total_l2_regularizer(net_ref, cost_domain="connection_graph")
-    assert abs(indep_net_graph_cost - our_net_graph_cost) < 1e-9, (
-        f"Full CNN connection_graph regularizer mismatch: {indep_net_graph_cost} vs {our_net_graph_cost}"
-    )
-
-    net_p = SequentialCIFARCNN(
-        in_channels=3, spatial_size=16, conv_channels=(4, 6, 8, 8), fc_hidden=12, num_classes=10
-    ).double()
-    net_g = SequentialCIFARCNN(
-        in_channels=3, spatial_size=16, conv_channels=(4, 6, 8, 8), fc_hidden=12, num_classes=10
-    ).double()
-    net_p.load_state_dict(net_ref.state_dict())
-    net_g.load_state_dict(net_ref.state_dict())
-    logs_p = partial_balance_cnn_once(net_p, conv_mode="layer", fc_mode="layer", cost_domain="parameter")
-    logs_g = partial_balance_cnn_once(net_g, conv_mode="layer", fc_mode="layer", cost_domain="connection_graph")
-
-    transition_names = [
-        "L1(conv1->conv2)",
-        "L2(conv2->pool->conv3)",
-        "L3(conv3->conv4)",
-        "L4(conv4->pool->fc1)",
-        "L5(fc1->fc2)",
-    ]
-    per_transition_diffs = [
-        float((lp - lg).abs().max().item()) for lp, lg in zip(logs_p, logs_g)
-    ]
-    assert per_transition_diffs[1] > 0.15, (
-        f"Expected large multiplier shift at L2(conv2->pool->conv3), got {per_transition_diffs[1]}"
-    )
-    assert per_transition_diffs[3] > 0.50, (
-        f"Expected large multiplier shift at L4(conv4->pool->fc1), got {per_transition_diffs[3]}"
-    )
-    assert per_transition_diffs[0] > 1e-5 and per_transition_diffs[2] > 1e-5, (
-        f"Expected non-zero border-multiplicity shift on unpooled conv transitions: {per_transition_diffs}"
-    )
-    report["test2a_per_transition_multiplier_diffs"] = {
-        name: val for name, val in zip(transition_names, per_transition_diffs)
-    }
-    diff_summary_str = ", ".join(
-        f"{name}={val:.4f}" for name, val in zip(transition_names, per_transition_diffs)
-    )
-    print(
-        f"[PASS] Test 2a (Independent Graph Reference & Per-Transition Multiplier Shifts):\n"
-        f"       |log(lam_param) - log(lam_graph)|: {diff_summary_str}"
-    )
-
-    for cost_dom in ["parameter", "connection_graph"]:
-        for balance_mode in ["layer", "channel"]:
-            fc_mode = "layer" if balance_mode == "layer" else "neuron"
-            rng_streams = IsolatedRNGStreams.from_seed(303)
-            model_conv = SequentialCIFARCNN(
+            rng_streams = IsolatedRNGStreams.from_seed(101)
+            model_f64 = SequentialCIFARCNN(
                 in_channels=3, spatial_size=16, conv_channels=(8, 16, 16, 32),
                 fc_hidden=24, num_classes=10, use_dropout=False
             ).double()
-            model_conv.reset_parameters_with_generator(rng_streams.gen_init)
+            model_f64.reset_parameters_with_generator(rng_streams.gen_init)
+            model_f64.eval()
 
-            extreme_scales = [
-                torch.tensor([4.0], dtype=torch.float64),
-                torch.tensor([0.2], dtype=torch.float64),
-                torch.tensor([3.5], dtype=torch.float64),
-                torch.tensor([0.3], dtype=torch.float64),
-                torch.tensor([2.5], dtype=torch.float64),
-            ]
-            for idx, scale in enumerate(extreme_scales):
-                _apply_scaling_to_layer_pair(
-                    model_conv.param_layers[idx],
-                    model_conv.param_layers[idx + 1],
-                    scale,
-                    mode="layer",
-                    final_spatial=model_conv.final_spatial,
-                )
-
-            r_initial = compute_total_l2_regularizer(model_conv, cost_domain=cost_dom)
-            r_prev = r_initial
-            for _ in range(30):
+            x_f64 = torch.randn(6, 3, 16, 16, generator=rng_streams.gen_loader, dtype=torch.float64)
+            with torch.no_grad():
+                logits_before_f64 = model_f64(x_f64).clone()
                 partial_balance_cnn_once(
-                    model_conv, conv_mode=balance_mode, fc_mode=fc_mode, cost_domain=cost_dom
+                    model_f64, conv_mode=conv_m, fc_mode=fc_m, cost_domain=cost_dom
                 )
-                r_curr = compute_total_l2_regularizer(model_conv, cost_domain=cost_dom)
-                assert r_curr <= r_prev + 1e-10, (
-                    f"[{cost_dom}, {balance_mode}] Regularizer increased: {r_curr} > {r_prev}"
+                logits_after_partial_f64 = model_f64(x_f64).clone()
+                conv_diag64 = full_balance_cnn_until_convergence(
+                    model_f64, conv_mode=conv_m, fc_mode=fc_m, cost_domain=cost_dom,
+                    tol=cfg.full_balance_tol_f64, max_iters=cfg.full_balance_max_iters
                 )
-                r_prev = r_curr
+                logits_after_full_f64 = model_f64(x_f64).clone()
 
-            diag_final = full_balance_cnn_until_convergence(
-                model_conv, conv_mode=balance_mode, fc_mode=fc_mode, cost_domain=cost_dom,
-                tol=cfg.full_balance_tol_f64, max_iters=cfg.full_balance_max_iters
+            assert conv_diag64["converged"], (
+                f"Float64 convergence failed for ({cost_dom}, {conv_m}, {fc_m}): "
+                f"max deficit = {conv_diag64['norm_deficit_eligible_max']}"
             )
-            r_final = compute_total_l2_regularizer(model_conv, cost_domain=cost_dom)
-            assert diag_final["converged"], f"Failed to converge in ({cost_dom}, {balance_mode})"
-            assert r_final < r_initial, "Regularizer did not strictly decrease on imbalanced CNN"
-            report["test2b_monotonic_convergence"].append({
+            diff_partial_f64 = float((logits_before_f64 - logits_after_partial_f64).abs().max().item())
+            diff_full_f64 = float((logits_before_f64 - logits_after_full_f64).abs().max().item())
+            assert diff_partial_f64 < cfg.logit_tol_f64, f"Float64 partial invariance failed: {diff_partial_f64}"
+            assert diff_full_f64 < cfg.logit_tol_f64, f"Float64 full invariance failed: {diff_full_f64}"
+
+            rng_streams32 = IsolatedRNGStreams.from_seed(202)
+            model_f32 = SequentialCIFARCNN(
+                in_channels=3, spatial_size=32, conv_channels=(16, 32, 64, 64),
+                fc_hidden=64, num_classes=10, use_dropout=False
+            ).float()
+            model_f32.reset_parameters_with_generator(rng_streams32.gen_init)
+            model_f32.eval()
+
+            x_f32 = torch.randn(8, 3, 32, 32, generator=rng_streams32.gen_loader, dtype=torch.float32)
+            with torch.no_grad():
+                logits_before_f32 = model_f32(x_f32).clone()
+                conv_diag32 = full_balance_cnn_until_convergence(
+                    model_f32, conv_mode=conv_m, fc_mode=fc_m, cost_domain=cost_dom,
+                    tol=cfg.full_balance_tol_f32, max_iters=cfg.full_balance_max_iters
+                )
+                logits_after_f32 = model_f32(x_f32).clone()
+
+            assert conv_diag32["converged"], (
+                f"Float32 convergence failed for ({cost_dom}, {conv_m}, {fc_m}): "
+                f"max deficit = {conv_diag32['norm_deficit_eligible_max']}"
+            )
+            diff_f32 = float((logits_before_f32 - logits_after_f32).abs().max().item())
+            assert diff_f32 < cfg.logit_tol_f32, (
+                f"Float32 invariance failed ({diff_f32:.2e} >= {cfg.logit_tol_f32:.2e})"
+            )
+            report["test1a_logit_invariance"].append({
                 "cost_domain": cost_dom,
-                "balance_mode": balance_mode,
-                "r_initial": r_initial,
-                "r_final": r_final,
-                "final_max_deficit": float(diag_final["norm_deficit_eligible_max"]),
+                "conv_mode": conv_m,
+                "fc_mode": fc_m,
+                "f64_partial_max_diff": diff_partial_f64,
+                "f64_full_max_diff": diff_full_f64,
+                "f32_full_max_diff": diff_f32,
+                "f64_iterations": int(conv_diag64["iterations"]),
+                "f32_iterations": int(conv_diag32["iterations"]),
             })
             print(
-                f"[PASS] Test 2b ({cost_dom:16s} | {balance_mode:7s}): Monotonic R(W) reduction "
-                f"({r_initial:.2f} -> {r_final:.2f}) & converged to {diag_final['norm_deficit_eligible_max']:.2e}"
+                f"[PASS] Test 1a ({cost_dom:16s} | conv={conv_m:7s} | fc={fc_m:6s}): "
+                f"f64 diff={diff_full_f64:.2e}, f32 diff={diff_f32:.2e} "
+                f"(iters={conv_diag64['iterations']})"
             )
 
-    rng_streams = IsolatedRNGStreams.from_seed(404)
-    model_zero = SequentialCIFARCNN(
-        in_channels=3, spatial_size=16, conv_channels=(8, 16, 16, 32),
-        fc_hidden=24, num_classes=10, use_dropout=False
-    ).double()
-    model_zero.reset_parameters_with_generator(rng_streams.gen_init)
-    with torch.no_grad():
-        model_zero.conv1.weight[0].zero_()
-        model_zero.conv1.bias[0].zero_()
-        model_zero.conv2.weight[:, 1, :, :].zero_()
-        model_zero.conv1.weight[2].fill_(1e-9)
-        model_zero.conv1.bias[2].fill_(1e-9)
+        current_test_section = "Test 1b: Active Dropout Fixed-Mask Invariance"
+        max_drop_diff = 0.0
+        for drop_mode in ["elementwise", "channel"]:
+            for cost_dom, conv_m, fc_m in mode_combinations:
+                rng_d1 = IsolatedRNGStreams.from_seed(777)
+                rng_d2 = IsolatedRNGStreams.from_seed(777)
+                model_drop = SequentialCIFARCNN(
+                    in_channels=3, spatial_size=16, conv_channels=(8, 16, 16, 32),
+                    fc_hidden=24, num_classes=10, use_dropout=True, conv_dropout_mode=drop_mode
+                ).double()
+                model_drop.reset_parameters_with_generator(rng_d1.gen_init)
+                model_drop.train()
+                x_d = torch.randn(4, 3, 16, 16, generator=rng_d1.gen_loader, dtype=torch.float64)
+                with torch.no_grad():
+                    out_drop_before = model_drop(x_d, dropout_rng=rng_d1.gen_dropout).clone()
+                    partial_balance_cnn_once(
+                        model_drop, conv_mode=conv_m, fc_mode=fc_m, cost_domain=cost_dom
+                    )
+                    out_drop_after = model_drop(x_d, dropout_rng=rng_d2.gen_dropout).clone()
+                diff_drop = float((out_drop_before - out_drop_after).abs().max().item())
+                max_drop_diff = max(max_drop_diff, diff_drop)
+                assert diff_drop < cfg.logit_tol_f64, (
+                    f"Fixed-mask dropout invariance failed ({drop_mode}, {cost_dom}, {conv_m}, {fc_m}): {diff_drop}"
+                )
+        report["test1b_active_dropout_invariance_max_diff"] = max_drop_diff
+        print(
+            "[PASS] Test 1b (Active Dropout Fixed-Mask Invariance): Verified across all 8 balance modes "
+            "x 2 dropout modes"
+        )
 
-    diag_z = compute_cnn_balance_diagnostics(
-        model_zero, conv_mode="channel", fc_mode="neuron", cost_domain="parameter", eps=1e-12
-    )
-    assert diag_z["n_zero_cost_excluded"] == 2, f"Expected 2 zero-cost exclusions, got {diag_z['n_zero_cost_excluded']}"
-    assert diag_z["n_near_zero_excluded"] == 1, f"Expected 1 near-zero exclusion, got {diag_z['n_near_zero_excluded']}"
-    partial_balance_cnn_once(model_zero, conv_mode="channel", fc_mode="neuron", cost_domain="parameter", eps=1e-12)
-    assert torch.all(model_zero.conv1.weight[0] == 0.0), "Zero incoming filter was modified"
-    assert torch.all(model_zero.conv2.weight[:, 1, :, :] == 0.0), "Zero outgoing slice was modified"
-    report["test3_eligibility_accounting"] = {
-        "n_total_units": int(diag_z["n_total_units"]),
-        "n_zero_cost_excluded": int(diag_z["n_zero_cost_excluded"]),
-        "n_near_zero_excluded": int(diag_z["n_near_zero_excluded"]),
-    }
-    print(
-        f"[PASS] Test 3 (Eligibility Diagnostics): Verified {diag_z['n_zero_cost_excluded']} zero-cost "
-        f"& {diag_z['n_near_zero_excluded']} near-zero exclusions out of {diag_z['n_total_units']} units"
-    )
+        current_test_section = "Test 2a: Independent Graph Enumeration & Multiplier Divergence"
+        test_conv_specs = [
+            {"kernel_size": 3, "padding": 0, "stride": 1, "dilation": 1, "h_in": 10, "w_in": 12},
+            {"kernel_size": 3, "padding": 1, "stride": 1, "dilation": 1, "h_in": 16, "w_in": 16},
+            {"kernel_size": 3, "padding": 1, "stride": 2, "dilation": 1, "h_in": 15, "w_in": 15},
+            {"kernel_size": 3, "padding": 2, "stride": 1, "dilation": 2, "h_in": 14, "w_in": 14},
+        ]
+        g_ref = torch.Generator(device="cpu").manual_seed(909)
+        for spec in test_conv_specs:
+            conv_test = nn.Conv2d(
+                2, 3,
+                kernel_size=spec["kernel_size"],
+                padding=spec["padding"],
+                stride=spec["stride"],
+                dilation=spec["dilation"],
+                bias=True,
+            ).double()
+            with torch.no_grad():
+                conv_test.weight.copy_(torch.randn(conv_test.weight.shape, generator=g_ref, dtype=torch.float64))
+                conv_test.bias.copy_(torch.randn(conv_test.bias.shape, generator=g_ref, dtype=torch.float64))
 
-    test_devices = [torch.device("cpu")]
-    if torch.cuda.is_available():
-        test_devices.append(torch.device("cuda"))
+            ref_cost, h_out, w_out = _brute_force_conv2d_graph_cost_reference(
+                conv_test, spec["h_in"], spec["w_in"], tol=cfg.graph_ref_tol_f64
+            )
+            mult_uv, bias_mult = compute_conv2d_spatial_multiplicity(
+                conv_test, spec["h_in"], spec["w_in"], h_out, w_out, device=torch.device("cpu")
+            )
+            our_cost = float(
+                (conv_test.weight.pow(2) * mult_uv.view(1, 1, *mult_uv.shape)).sum().item()
+                + (conv_test.bias.pow(2) * bias_mult).sum().item()
+            )
+            assert abs(ref_cost - our_cost) < cfg.graph_ref_tol_f64, (
+                f"Multiplicity graph cost mismatch for {spec}: ref={ref_cost} vs our={our_cost}"
+            )
 
-    for dev in test_devices:
-        streams_a = IsolatedRNGStreams.from_seed(505, device=dev)
-        streams_b = IsolatedRNGStreams.from_seed(505, device=dev)
-        streams_d = IsolatedRNGStreams.from_seed(505, device=dev)
+        rng_net_ref = IsolatedRNGStreams.from_seed(910)
+        net_ref = SequentialCIFARCNN(
+            in_channels=3, spatial_size=16, conv_channels=(4, 6, 8, 8), fc_hidden=12, num_classes=10
+        ).double()
+        net_ref.reset_parameters_with_generator(rng_net_ref.gen_init)
+        indep_net_graph_cost = 0.0
+        for idx_c, conv_l in enumerate([net_ref.conv1, net_ref.conv2, net_ref.conv3, net_ref.conv4]):
+            h_in, w_in, _, _ = net_ref.conv_spatial_shapes[idx_c]
+            c_cost, _, _ = _brute_force_conv2d_graph_cost_reference(
+                conv_l, h_in, w_in, tol=cfg.graph_ref_tol_f64
+            )
+            indep_net_graph_cost += c_cost
+        for fc_l in [net_ref.fc1, net_ref.fc2]:
+            indep_net_graph_cost += float(fc_l.weight.pow(2).sum().item() + fc_l.bias.pow(2).sum().item())
+        our_net_graph_cost = compute_total_l2_regularizer(net_ref, cost_domain="connection_graph")
+        assert abs(indep_net_graph_cost - our_net_graph_cost) < cfg.graph_ref_tol_f64, (
+            f"Full CNN connection_graph regularizer mismatch: {indep_net_graph_cost} vs {our_net_graph_cost}"
+        )
 
-        net_a = SequentialCIFARCNN(spatial_size=16, conv_channels=(8, 8, 16, 16), fc_hidden=16, use_dropout=False).to(dev)
-        net_b = SequentialCIFARCNN(spatial_size=16, conv_channels=(8, 8, 16, 16), fc_hidden=16, use_dropout=True).to(dev)
-        net_d = SequentialCIFARCNN(spatial_size=16, conv_channels=(8, 8, 16, 16), fc_hidden=16, use_dropout=True).to(dev)
+        net_p = SequentialCIFARCNN(
+            in_channels=3, spatial_size=16, conv_channels=(4, 6, 8, 8), fc_hidden=12, num_classes=10
+        ).double()
+        net_g = SequentialCIFARCNN(
+            in_channels=3, spatial_size=16, conv_channels=(4, 6, 8, 8), fc_hidden=12, num_classes=10
+        ).double()
+        net_p.load_state_dict(net_ref.state_dict())
+        net_g.load_state_dict(net_ref.state_dict())
+        logs_p = partial_balance_cnn_once(net_p, conv_mode="layer", fc_mode="layer", cost_domain="parameter")
+        logs_g = partial_balance_cnn_once(net_g, conv_mode="layer", fc_mode="layer", cost_domain="connection_graph")
 
-        net_a.reset_parameters_with_generator(streams_a.gen_init)
-        net_b.reset_parameters_with_generator(streams_b.gen_init)
-        net_d.reset_parameters_with_generator(streams_d.gen_init)
+        transition_names = list(SequentialCIFARCNN.TRANSITION_NAMES)
+        per_transition_diffs = [
+            float((lp - lg).abs().max().item()) for lp, lg in zip(logs_p, logs_g)
+        ]
+        assert per_transition_diffs[1] > 0.15, (
+            f"Expected large multiplier shift at {transition_names[1]}, got {per_transition_diffs[1]}"
+        )
+        assert per_transition_diffs[3] > 0.50, (
+            f"Expected large multiplier shift at {transition_names[3]}, got {per_transition_diffs[3]}"
+        )
+        assert per_transition_diffs[0] > 1e-5 and per_transition_diffs[2] > 1e-5, (
+            f"Expected non-zero border-multiplicity shift on unpooled conv transitions: {per_transition_diffs}"
+        )
+        report["test2a_per_transition_multiplier_diffs"] = {
+            name: val for name, val in zip(transition_names, per_transition_diffs)
+        }
+        diff_summary_str = ", ".join(
+            f"{name}={val:.4f}" for name, val in zip(transition_names, per_transition_diffs)
+        )
+        print(
+            f"[PASS] Test 2a (Independent Graph Reference & Per-Transition Multiplier Shifts):\n"
+            f"       |log(lam_param) - log(lam_graph)|: {diff_summary_str}"
+        )
 
-        for (na, pa), (nb, pb), (nd, pd_param) in zip(
-            net_a.named_parameters(), net_b.named_parameters(), net_d.named_parameters()
-        ):
-            assert torch.equal(pa, pb) and torch.equal(pb, pd_param), f"Parameter mismatch at init on {na}"
+        current_test_section = "Test 2b: Monotonic R(W) Cost Reduction & Convergence"
+        for cost_dom in ["parameter", "connection_graph"]:
+            for balance_mode in ["layer", "channel"]:
+                fc_mode = "layer" if balance_mode == "layer" else "neuron"
+                rng_streams = IsolatedRNGStreams.from_seed(303)
+                model_conv = SequentialCIFARCNN(
+                    in_channels=3, spatial_size=16, conv_channels=(8, 16, 16, 32),
+                    fc_hidden=24, num_classes=10, use_dropout=False
+                ).double()
+                model_conv.reset_parameters_with_generator(rng_streams.gen_init)
 
-        synth_x = torch.randn(32, 3, 16, 16)
-        synth_y = torch.randint(0, 10, (32,))
-        ds = torch.utils.data.TensorDataset(synth_x, synth_y)
-        loader_a = DataLoader(ds, batch_size=8, shuffle=True, generator=streams_a.gen_loader)
-        loader_b = DataLoader(ds, batch_size=8, shuffle=True, generator=streams_b.gen_loader)
-        loader_d = DataLoader(ds, batch_size=8, shuffle=True, generator=streams_d.gen_loader)
+                extreme_scales = [
+                    torch.tensor([4.0], dtype=torch.float64),
+                    torch.tensor([0.2], dtype=torch.float64),
+                    torch.tensor([3.5], dtype=torch.float64),
+                    torch.tensor([0.3], dtype=torch.float64),
+                    torch.tensor([2.5], dtype=torch.float64),
+                ]
+                for idx, scale in enumerate(extreme_scales):
+                    _apply_scaling_to_layer_pair(
+                        model_conv.param_layers[idx],
+                        model_conv.param_layers[idx + 1],
+                        scale,
+                        mode="layer",
+                        final_spatial=model_conv.final_spatial,
+                    )
 
-        net_a.train()
-        net_b.train()
-        net_d.train()
-        for epoch in range(2):
-            batches_a = list(loader_a)
-            batches_b = list(loader_b)
-            batches_d = list(loader_d)
-            for (xa, ya), (xb, yb), (xd, yd) in zip(batches_a, batches_b, batches_d):
-                assert torch.equal(xa, xb) and torch.equal(xb, xd), f"Batch X diverged at epoch {epoch}"
-                assert torch.equal(ya, yb) and torch.equal(yb, yd), f"Batch Y diverged at epoch {epoch}"
+                r_initial = compute_total_l2_regularizer(model_conv, cost_domain=cost_dom)
+                r_prev = r_initial
+                for _ in range(30):
+                    partial_balance_cnn_once(
+                        model_conv, conv_mode=balance_mode, fc_mode=fc_mode, cost_domain=cost_dom
+                    )
+                    r_curr = compute_total_l2_regularizer(model_conv, cost_domain=cost_dom)
+                    assert r_curr <= r_prev + 1e-10, (
+                        f"[{cost_dom}, {balance_mode}] Regularizer increased: {r_curr} > {r_prev}"
+                    )
+                    r_prev = r_curr
 
-                aug_a = DeterministicAugmentedCIFARDataset.apply_paired_batch_augmentation(xa, streams_a.gen_aug)
-                _ = torch.rand(10, generator=streams_b.gen_rescale)
-                aug_b = DeterministicAugmentedCIFARDataset.apply_paired_batch_augmentation(xb, streams_b.gen_aug)
-                aug_d = DeterministicAugmentedCIFARDataset.apply_paired_batch_augmentation(xd, streams_d.gen_aug)
-                assert torch.equal(aug_a, aug_b) and torch.equal(aug_b, aug_d), "Paired augmentation diverged"
+                diag_final = full_balance_cnn_until_convergence(
+                    model_conv, conv_mode=balance_mode, fc_mode=fc_mode, cost_domain=cost_dom,
+                    tol=cfg.full_balance_tol_f64, max_iters=cfg.full_balance_max_iters
+                )
+                r_final = compute_total_l2_regularizer(model_conv, cost_domain=cost_dom)
+                assert diag_final["converged"], f"Failed to converge in ({cost_dom}, {balance_mode})"
+                assert r_final < r_initial, "Regularizer did not strictly decrease on imbalanced CNN"
+                report["test2b_monotonic_convergence"].append({
+                    "cost_domain": cost_dom,
+                    "balance_mode": balance_mode,
+                    "r_initial": r_initial,
+                    "r_final": r_final,
+                    "final_max_deficit": float(diag_final["norm_deficit_eligible_max"]),
+                })
+                print(
+                    f"[PASS] Test 2b ({cost_dom:16s} | {balance_mode:7s}): Monotonic R(W) reduction "
+                    f"({r_initial:.2f} -> {r_final:.2f}) & converged to {diag_final['norm_deficit_eligible_max']:.2e}"
+                )
 
-                _ = net_a(aug_a.to(dev), dropout_rng=None)
-                out_b = net_b(aug_b.to(dev), dropout_rng=streams_b.gen_dropout)
-                out_d = net_d(aug_d.to(dev), dropout_rng=streams_d.gen_dropout)
-                assert torch.equal(out_b, out_d), f"Paired B-vs-D dropout outputs diverged on {dev}"
+        current_test_section = "Test 3: Dead/Zero-Cost & Near-Zero-Cost Unit Exclusion"
+        rng_streams = IsolatedRNGStreams.from_seed(404)
+        model_zero = SequentialCIFARCNN(
+            in_channels=3, spatial_size=16, conv_channels=(8, 16, 16, 32),
+            fc_hidden=24, num_classes=10, use_dropout=False
+        ).double()
+        model_zero.reset_parameters_with_generator(rng_streams.gen_init)
+        with torch.no_grad():
+            model_zero.conv1.weight[0].zero_()
+            model_zero.conv1.bias[0].zero_()
+            model_zero.conv2.weight[:, 1, :, :].zero_()
+            model_zero.conv1.weight[2].fill_(1e-9)
+            model_zero.conv1.bias[2].fill_(1e-9)
 
-    assert set(cfg.smoke_seeds).isdisjoint(set(cfg.pilot_seeds)), "Smoke and pilot seeds overlap!"
-    assert set(cfg.pilot_seeds).isdisjoint(set(cfg.full_seeds)), "Pilot and full confirmatory seeds overlap!"
-    assert set(cfg.smoke_seeds).isdisjoint(set(cfg.full_seeds)), "Smoke and full seeds overlap!"
+        diag_z = compute_cnn_balance_diagnostics(
+            model_zero, conv_mode="channel", fc_mode="neuron", cost_domain="parameter", eps=1e-12
+        )
+        assert diag_z["n_zero_cost_excluded"] == 2, f"Expected 2 zero-cost exclusions, got {diag_z['n_zero_cost_excluded']}"
+        assert diag_z["n_near_zero_excluded"] == 1, f"Expected 1 near-zero exclusion, got {diag_z['n_near_zero_excluded']}"
+        partial_balance_cnn_once(model_zero, conv_mode="channel", fc_mode="neuron", cost_domain="parameter", eps=1e-12)
+        assert torch.all(model_zero.conv1.weight[0] == 0.0), "Zero incoming filter was modified"
+        assert torch.all(model_zero.conv2.weight[:, 1, :, :] == 0.0), "Zero outgoing slice was modified"
+        report["test3_eligibility_accounting"] = {
+            "n_total_units": int(diag_z["n_total_units"]),
+            "n_zero_cost_excluded": int(diag_z["n_zero_cost_excluded"]),
+            "n_near_zero_excluded": int(diag_z["n_near_zero_excluded"]),
+        }
+        print(
+            f"[PASS] Test 3 (Eligibility Diagnostics): Verified {diag_z['n_zero_cost_excluded']} zero-cost "
+            f"& {diag_z['n_near_zero_excluded']} near-zero exclusions out of {diag_z['n_total_units']} units"
+        )
 
-    cfg_s2_full = CNNExperimentConfig(stage=2, run_mode="full")
-    cfg_s3_full = CNNExperimentConfig(stage=3, run_mode="full")
-    cfg_s3_leak_attempt = CNNExperimentConfig(
-        stage=3, run_mode="full", allow_nonconfirmatory_test_eval=True
-    )
-    cfg_s3_conf = CNNExperimentConfig(stage=3, run_mode="full", stage3_confirmatory_test_eval=True)
-    assert cfg_s2_full.should_evaluate_test_set() is True, "Stage 2 full should evaluate test set"
-    assert cfg_s3_full.should_evaluate_test_set() is False, "Stage 3 full must withhold test set by default"
-    assert cfg_s3_leak_attempt.should_evaluate_test_set() is False, (
-        "Generic allow_nonconfirmatory_test_eval must NOT unlock Stage 3 test set!"
-    )
-    assert cfg_s3_conf.should_evaluate_test_set() is True, "Stage 3 confirmatory flag should unlock test set"
-    assert cfg_s2_full.run_tag() != cfg_s3_full.run_tag(), "Stage 2 and Stage 3 run_tags collided!"
-    assert cfg_s3_full.run_tag() != cfg_s3_conf.run_tag(), "Config fingerprint failed to distinguish test policy!"
-    report["test4_rng_and_policy_checks"] = {
-        "tested_devices": [str(d) for d in test_devices],
-        "stage3_generic_override_blocked": True,
-        "seed_tiers_disjoint": True,
-    }
-    print(
-        f"[PASS] Test 4 (RNG, B-vs-D Dropout Isolation on {[str(d) for d in test_devices]}, "
-        "Strict Stage 3 Test Policy & Config Hash): Verified"
-    )
+        current_test_section = "Test 4: Isolated RNG Streams, B-vs-D Dropout Masks & Test-Set Policy"
+        test_devices = [torch.device("cpu")]
+        if torch.cuda.is_available():
+            test_devices.append(torch.device("cuda"))
 
-    synth_rows = []
-    synth_s3_rows = []
-    for s_idx, seed in enumerate([43, 44, 45, 46, 47]):
-        jitter = (s_idx - 2) * 0.0004
-        synth_rows.extend([
-            {"seed": seed, "group_code": "A", "final_val_accuracy": 0.720000 + jitter, "val_loss": 0.850},
-            {"seed": seed, "group_code": "B", "final_val_accuracy": 0.710000 + jitter * 1.1, "val_loss": 0.870},
-            {"seed": seed, "group_code": "C", "final_val_accuracy": 0.735000 + jitter * 0.9, "val_loss": 0.810},
-            {"seed": seed, "group_code": "D", "final_val_accuracy": 0.742000 + jitter * 1.2, "val_loss": 0.790},
-        ])
-        synth_s3_rows.extend([
-            {"seed": seed, "group_code": "C_ref",  "final_val_accuracy": 0.735000 + jitter},
-            {"seed": seed, "group_code": "C_rand", "final_val_accuracy": 0.722000 + jitter * 0.8},
-            {"seed": seed, "group_code": "D_ref",  "final_val_accuracy": 0.742000 + jitter * 1.1},
-            {"seed": seed, "group_code": "D_rand", "final_val_accuracy": 0.711000 + jitter * 0.9},
-        ])
-    rep = compute_factorial_interaction_report(
-        pd.DataFrame(synth_rows), metrics=["final_val_accuracy", "val_loss"], primary_metric="final_val_accuracy"
-    )
-    row_acc = rep[rep["metric"] == "final_val_accuracy"].iloc[0]
-    expected_did = (0.742 - 0.735) - (0.710 - 0.720)
-    assert abs(row_acc["interaction_DiD_mean"] - expected_did) < 1e-12
+        for dev in test_devices:
+            streams_a = IsolatedRNGStreams.from_seed(505, device=dev)
+            streams_b = IsolatedRNGStreams.from_seed(505, device=dev)
+            streams_d = IsolatedRNGStreams.from_seed(505, device=dev)
 
-    rep_s3 = compute_stage3_random_rescale_contrasts(
-        pd.DataFrame(synth_s3_rows), metrics=["final_val_accuracy"], primary_metric="final_val_accuracy"
-    )
-    row_s3 = rep_s3.iloc[0]
-    expected_s3_inter = (0.742 - 0.711) - (0.735 - 0.722)
-    assert abs(row_s3["delta_interaction_mean"] - expected_s3_inter) < 1e-12
-    for prefix in ["delta_C", "delta_D", "delta_interaction"]:
-        for suffix in ["mean", "sd", "se", "ci95_halfwidth", "ci95_low", "ci95_high", "t_stat", "p_unadjusted"]:
-            col_name = f"{prefix}_{suffix}"
-            assert col_name in rep_s3.columns, f"Missing symmetric Stage 3 column: {col_name}"
+            net_a = SequentialCIFARCNN(spatial_size=16, conv_channels=(8, 8, 16, 16), fc_hidden=16, use_dropout=False).to(dev)
+            net_b = SequentialCIFARCNN(spatial_size=16, conv_channels=(8, 8, 16, 16), fc_hidden=16, use_dropout=True).to(dev)
+            net_d = SequentialCIFARCNN(spatial_size=16, conv_channels=(8, 8, 16, 16), fc_hidden=16, use_dropout=True).to(dev)
 
-    report["test5_statistical_pipeline_checks"] = {
-        "stage2_synthetic_did_pp": float(row_acc["interaction_DiD_mean"] * 100.0),
-        "stage3_synthetic_delta_interaction_pp": float(row_s3["delta_interaction_mean"] * 100.0),
-    }
-    report["all_passed"] = True
+            net_a.reset_parameters_with_generator(streams_a.gen_init)
+            net_b.reset_parameters_with_generator(streams_b.gen_init)
+            net_d.reset_parameters_with_generator(streams_d.gen_init)
 
-    if save_report_path is None:
-        os.makedirs(cfg.output_root, exist_ok=True)
-        save_report_path = os.path.join(cfg.output_root, "stage1_verification_report.json")
-    with open(save_report_path, "w", encoding="utf-8") as f:
-        json.dump(report, f, indent=2)
+            for (na, pa), (nb, pb), (nd, pd_param) in zip(
+                net_a.named_parameters(), net_b.named_parameters(), net_d.named_parameters()
+            ):
+                assert torch.equal(pa, pb) and torch.equal(pb, pd_param), f"Parameter mismatch at init on {na}"
+
+            synth_x = torch.randn(32, 3, 16, 16)
+            synth_y = torch.randint(0, 10, (32,))
+            ds = torch.utils.data.TensorDataset(synth_x, synth_y)
+            loader_a = DataLoader(ds, batch_size=8, shuffle=True, generator=streams_a.gen_loader)
+            loader_b = DataLoader(ds, batch_size=8, shuffle=True, generator=streams_b.gen_loader)
+            loader_d = DataLoader(ds, batch_size=8, shuffle=True, generator=streams_d.gen_loader)
+
+            net_a.train()
+            net_b.train()
+            net_d.train()
+            for epoch in range(2):
+                batches_a = list(loader_a)
+                batches_b = list(loader_b)
+                batches_d = list(loader_d)
+                for (xa, ya), (xb, yb), (xd, yd) in zip(batches_a, batches_b, batches_d):
+                    assert torch.equal(xa, xb) and torch.equal(xb, xd), f"Batch X diverged at epoch {epoch}"
+                    assert torch.equal(ya, yb) and torch.equal(yb, yd), f"Batch Y diverged at epoch {epoch}"
+
+                    aug_a = DeterministicAugmentedCIFARDataset.apply_paired_batch_augmentation(xa, streams_a.gen_aug)
+                    _ = torch.rand(10, generator=streams_b.gen_rescale)
+                    aug_b = DeterministicAugmentedCIFARDataset.apply_paired_batch_augmentation(xb, streams_b.gen_aug)
+                    aug_d = DeterministicAugmentedCIFARDataset.apply_paired_batch_augmentation(xd, streams_d.gen_aug)
+                    assert torch.equal(aug_a, aug_b) and torch.equal(aug_b, aug_d), "Paired augmentation diverged"
+
+                    _ = net_a(aug_a.to(dev), dropout_rng=None)
+                    out_b = net_b(aug_b.to(dev), dropout_rng=streams_b.gen_dropout)
+                    out_d = net_d(aug_d.to(dev), dropout_rng=streams_d.gen_dropout)
+                    assert torch.equal(out_b, out_d), f"Paired B-vs-D dropout outputs diverged on {dev}"
+
+        assert set(cfg.smoke_seeds).isdisjoint(set(cfg.pilot_seeds)), "Smoke and pilot seeds overlap!"
+        assert set(cfg.pilot_seeds).isdisjoint(set(cfg.full_seeds)), "Pilot and full confirmatory seeds overlap!"
+        assert set(cfg.smoke_seeds).isdisjoint(set(cfg.full_seeds)), "Smoke and full seeds overlap!"
+
+        cfg_s2_full = CNNExperimentConfig(stage=2, run_mode="full")
+        cfg_s3_full = CNNExperimentConfig(stage=3, run_mode="full")
+        cfg_s3_leak_attempt = CNNExperimentConfig(
+            stage=3, run_mode="full", allow_nonconfirmatory_test_eval=True
+        )
+        cfg_s3_conf = CNNExperimentConfig(stage=3, run_mode="full", stage3_confirmatory_test_eval=True)
+        assert cfg_s2_full.should_evaluate_test_set() is True, "Stage 2 full should evaluate test set"
+        assert cfg_s3_full.should_evaluate_test_set() is False, "Stage 3 full must withhold test set by default"
+        assert cfg_s3_leak_attempt.should_evaluate_test_set() is False, (
+            "Generic allow_nonconfirmatory_test_eval must NOT unlock Stage 3 test set!"
+        )
+        assert cfg_s3_conf.should_evaluate_test_set() is True, "Stage 3 confirmatory flag should unlock test set"
+        assert cfg_s2_full.run_tag() != cfg_s3_full.run_tag(), "Stage 2 and Stage 3 run_tags collided!"
+        assert cfg_s3_full.run_tag() != cfg_s3_conf.run_tag(), "Config fingerprint failed to distinguish test policy!"
+        report["test4_rng_and_policy_checks"] = {
+            "tested_devices": [str(d) for d in test_devices],
+            "stage3_generic_override_blocked": True,
+            "seed_tiers_disjoint": True,
+        }
+        print(
+            f"[PASS] Test 4 (RNG, B-vs-D Dropout Isolation on {[str(d) for d in test_devices]}, "
+            "Strict Stage 3 Test Policy & Config Hash): Verified"
+        )
+
+        current_test_section = "Test 5: Stage 2 DiD & Symmetric Stage 3 Contrasts"
+        synth_rows = []
+        synth_s3_rows = []
+        for s_idx, seed in enumerate([43, 44, 45, 46, 47]):
+            jitter = (s_idx - 2) * 0.0004
+            synth_rows.extend([
+                {"seed": seed, "group_code": "A", "final_val_accuracy": 0.720000 + jitter, "val_loss": 0.850},
+                {"seed": seed, "group_code": "B", "final_val_accuracy": 0.710000 + jitter * 1.1, "val_loss": 0.870},
+                {"seed": seed, "group_code": "C", "final_val_accuracy": 0.735000 + jitter * 0.9, "val_loss": 0.810},
+                {"seed": seed, "group_code": "D", "final_val_accuracy": 0.742000 + jitter * 1.2, "val_loss": 0.790},
+            ])
+            synth_s3_rows.extend([
+                {"seed": seed, "group_code": "C_ref",  "final_val_accuracy": 0.735000 + jitter},
+                {"seed": seed, "group_code": "C_rand", "final_val_accuracy": 0.722000 + jitter * 0.8},
+                {"seed": seed, "group_code": "D_ref",  "final_val_accuracy": 0.742000 + jitter * 1.1},
+                {"seed": seed, "group_code": "D_rand", "final_val_accuracy": 0.711000 + jitter * 0.9},
+            ])
+        rep = compute_factorial_interaction_report(
+            pd.DataFrame(synth_rows), metrics=["final_val_accuracy", "val_loss"], primary_metric="final_val_accuracy"
+        )
+        row_acc = rep[rep["metric"] == "final_val_accuracy"].iloc[0]
+        expected_did = (0.742 - 0.735) - (0.710 - 0.720)
+        assert abs(row_acc["interaction_DiD_mean"] - expected_did) < 1e-12
+
+        rep_s3 = compute_stage3_random_rescale_contrasts(
+            pd.DataFrame(synth_s3_rows), metrics=["final_val_accuracy"], primary_metric="final_val_accuracy"
+        )
+        row_s3 = rep_s3.iloc[0]
+        expected_s3_inter = (0.742 - 0.711) - (0.735 - 0.722)
+        assert abs(row_s3["delta_interaction_mean"] - expected_s3_inter) < 1e-12
+        for prefix in ["delta_C", "delta_D", "delta_interaction"]:
+            for suffix in ["mean", "sd", "se", "ci95_halfwidth", "ci95_low", "ci95_high", "t_stat", "p_unadjusted"]:
+                col_name = f"{prefix}_{suffix}"
+                assert col_name in rep_s3.columns, f"Missing symmetric Stage 3 column: {col_name}"
+
+        report["test5_statistical_pipeline_checks"] = {
+            "stage2_synthetic_did_pp": float(row_acc["interaction_DiD_mean"] * 100.0),
+            "stage3_synthetic_delta_interaction_pp": float(row_s3["delta_interaction_mean"] * 100.0),
+        }
+        report["all_passed"] = True
+
+    except Exception as exc:
+        report["all_passed"] = False
+        report["failed_test"] = current_test_section
+        report["error_type"] = type(exc).__name__
+        report["error_message"] = str(exc)
+        raise
+
+    finally:
+        if save_report_path is None:
+            os.makedirs(cfg.output_root, exist_ok=True)
+            save_report_path = os.path.join(cfg.output_root, "stage1_verification_report.json")
+        else:
+            os.makedirs(os.path.dirname(os.path.abspath(save_report_path)), exist_ok=True)
+        with open(save_report_path, "w", encoding="utf-8") as f:
+            json.dump(report, f, indent=2)
 
     print(
         f"[PASS] Test 5 (Stage 2 DiD & Symmetric Stage 3 Contrasts): Verified Stage 2 DiD = "
@@ -1626,6 +1693,7 @@ def train_and_evaluate_condition(
     val_loader: DataLoader,
     test_loader: Optional[DataLoader],
     device: torch.device,
+    initial_git_info: Dict[str, Any],
     conv_dropout_override: Optional[float] = None,
     fc_dropout_override: Optional[float] = None,
     reference_epoch_log_lambdas: Optional[List[List[torch.Tensor]]] = None,
@@ -1663,7 +1731,6 @@ def train_and_evaluate_condition(
     epochs = cfg.active_epochs()
     cfg_hash = cfg.config_fingerprint()
     r_tag = cfg.run_tag()
-    git_info = get_git_provenance()
     script_sha = get_source_script_sha256()
     unit_type_str = cfg.constraint_unit_type_label()
     curve_rows: List[Dict[str, Any]] = []
@@ -1696,20 +1763,25 @@ def train_and_evaluate_condition(
                 epoch_train_correct += int((logits.argmax(dim=1) == yb).sum().item())
                 epoch_train_samples += int(yb.numel())
 
+        # Capture pre-balance squared costs right after the epoch's SGD updates
+        pre_bal_param_total = compute_total_l2_regularizer(model, cost_domain="parameter")
+        pre_bal_graph_total = compute_total_l2_regularizer(model, cost_domain="connection_graph")
+
         t_bal0 = time.perf_counter()
+        applied_step_logs: Optional[List[torch.Tensor]] = None
         if balance_schedule == "interleaved":
-            step_logs = partial_balance_cnn_once(
+            applied_step_logs = partial_balance_cnn_once(
                 model,
                 conv_mode=cfg.balance_mode,
                 fc_mode=cfg.fc_balance_mode,
                 cost_domain=cfg.cost_domain,
                 eps=cfg.balance_eps,
             )
-            recorded_log_lambdas.append(step_logs)
+            recorded_log_lambdas.append(applied_step_logs)
         elif balance_schedule == "random_rescaled":
             if reference_epoch_log_lambdas is None or len(reference_epoch_log_lambdas) < epoch:
                 raise ValueError("reference_epoch_log_lambdas required for random_rescaled control")
-            apply_matched_random_rescaling_cnn(
+            applied_step_logs = apply_matched_random_rescaling_cnn(
                 model,
                 reference_epoch_log_lambdas[epoch - 1],
                 rng=rng.gen_rescale,
@@ -1731,10 +1803,12 @@ def train_and_evaluate_condition(
             cost_domain=cfg.cost_domain,
             eps=cfg.balance_eps,
         )
-        r_param = compute_total_l2_regularizer(model, cost_domain="parameter")
-        r_graph = compute_total_l2_regularizer(model, cost_domain="connection_graph")
+        post_param_layers = compute_per_layer_squared_costs(model, cost_domain="parameter")
+        post_graph_layers = compute_per_layer_squared_costs(model, cost_domain="connection_graph")
+        r_param = float(sum(post_param_layers.values()))
+        r_graph = float(sum(post_graph_layers.values()))
 
-        curve_rows.append({
+        row_dict: Dict[str, Any] = {
             "script_version": cfg.version,
             "stage": int(cfg.stage),
             "config_fingerprint": cfg_hash,
@@ -1757,10 +1831,10 @@ def train_and_evaluate_condition(
             "val_accuracy": float(val_acc),
             "generalization_gap": float(train_sub_acc - val_acc),
             "train_mode_minus_val_accuracy": float(train_mode_acc - val_acc),
+            "pre_balance_parameter_squared_cost": float(pre_bal_param_total),
+            "pre_balance_connection_graph_squared_cost": float(pre_bal_graph_total),
             "parameter_squared_cost": float(r_param),
             "connection_graph_squared_cost": float(r_graph),
-            "l2_regularizer_param_norm": float(r_param),
-            "l2_regularizer_graph_norm": float(r_graph),
             "norm_deficit_eligible_mean": float(diag["norm_deficit_eligible_mean"]),
             "norm_deficit_eligible_max": float(diag["norm_deficit_eligible_max"]),
             "param_domain_norm_deficit_mean": float(diag["param_domain_norm_deficit_mean"]),
@@ -1769,7 +1843,23 @@ def train_and_evaluate_condition(
             "graph_domain_norm_deficit_max": float(diag["graph_domain_norm_deficit_max"]),
             "n_eligible_balance_constraints": int(diag["n_eligible_units"]),
             "eligible_fraction": float(diag["eligible_fraction"]),
-        })
+        }
+
+        # Per-layer post-balance squared costs and applied log_lambda summaries
+        for l_name in SequentialCIFARCNN.LAYER_NAMES:
+            row_dict[f"param_sq_cost_{l_name}"] = float(post_param_layers[l_name])
+            row_dict[f"graph_sq_cost_{l_name}"] = float(post_graph_layers[l_name])
+
+        for t_idx, t_name in enumerate(SequentialCIFARCNN.TRANSITION_NAMES):
+            if applied_step_logs is not None:
+                log_t = applied_step_logs[t_idx]
+                row_dict[f"log_lambda_mean_{t_name}"] = float(log_t.mean().item())
+                row_dict[f"log_lambda_abs_mean_{t_name}"] = float(log_t.abs().mean().item())
+            else:
+                row_dict[f"log_lambda_mean_{t_name}"] = 0.0
+                row_dict[f"log_lambda_abs_mean_{t_name}"] = 0.0
+
+        curve_rows.append(row_dict)
 
     total_train_sec = time.perf_counter() - t_start
     final_train_sub_loss = curve_rows[-1]["train_subset_eval_loss"]
@@ -1803,7 +1893,7 @@ def train_and_evaluate_condition(
                 "config": asdict(cfg),
                 "config_fingerprint": cfg_hash,
                 "source_script_sha256": script_sha,
-                "git_provenance": git_info,
+                "git_provenance": initial_git_info,
                 "seed": seed,
                 "group_code": group_code,
             },
@@ -1824,9 +1914,9 @@ def train_and_evaluate_condition(
     summary_row = {
         "script_version": cfg.version,
         "source_script_sha256": script_sha,
-        "git_commit": git_info["git_commit_short"],
-        "git_commit_full": git_info["git_commit_full"],
-        "git_working_tree_dirty": bool(git_info["git_working_tree_dirty"]),
+        "git_commit": initial_git_info["git_commit_short"],
+        "git_commit_full": initial_git_info["git_commit_full"],
+        "git_working_tree_dirty": bool(initial_git_info["git_working_tree_dirty"]),
         "pytorch_version": torch.__version__,
         "torchvision_version": torchvision.__version__,
         "device": str(device),
@@ -1876,8 +1966,6 @@ def train_and_evaluate_condition(
         "val_abs_change_last_5_epochs": float(val_delta_last5),
         "parameter_squared_cost": r_param_final,
         "connection_graph_squared_cost": r_graph_final,
-        "l2_regularizer_param_norm": r_param_final,
-        "l2_regularizer_graph_norm": r_graph_final,
         "norm_deficit_eligible_mean": float(final_diag["norm_deficit_eligible_mean"]),
         "norm_deficit_eligible_max": float(final_diag["norm_deficit_eligible_max"]),
         "param_domain_norm_deficit_mean": float(final_diag["param_domain_norm_deficit_mean"]),
@@ -1886,7 +1974,6 @@ def train_and_evaluate_condition(
         "graph_domain_norm_deficit_max": float(final_diag["graph_domain_norm_deficit_max"]),
         "raw_l2_deficit_eligible": float(final_diag["raw_l2_deficit_eligible"]),
         "n_eligible_balance_constraints": int(final_diag["n_eligible_units"]),
-        "n_eligible_units": int(final_diag["n_eligible_units"]),
         "n_zero_cost_excluded": int(final_diag["n_zero_cost_excluded"]),
         "n_near_zero_excluded": int(final_diag["n_near_zero_excluded"]),
         "training_time_sec": float(total_train_sec),
@@ -1895,13 +1982,10 @@ def train_and_evaluate_condition(
     return summary_row, curve_rows, recorded_log_lambdas
 
 
-def save_provenance_manifest(cfg: CNNExperimentConfig, device: torch.device) -> str:
-    git_info = get_git_provenance()
-    if cfg.require_clean_git and git_info["git_working_tree_dirty"]:
-        raise RuntimeError(
-            f"Git working tree is dirty ({git_info['git_dirty_files']}) and "
-            "--require-clean-git was specified. Commit your changes before running."
-        )
+def save_provenance_manifest(
+    cfg: CNNExperimentConfig, device: torch.device, initial_git_info: Dict[str, Any]
+) -> str:
+    enforce_clean_git_if_requested(cfg, initial_git_info)
     manifest_path = cfg.output_path(f"stage{cfg.stage}_provenance_manifest.json")
     manifest = {
         "script_version": cfg.version,
@@ -1909,10 +1993,10 @@ def save_provenance_manifest(cfg: CNNExperimentConfig, device: torch.device) -> 
         "stage": int(cfg.stage),
         "config_fingerprint": cfg.config_fingerprint(),
         "run_tag": cfg.run_tag(),
-        "git_commit": git_info["git_commit_short"],
-        "git_commit_full": git_info["git_commit_full"],
-        "git_working_tree_dirty": bool(git_info["git_working_tree_dirty"]),
-        "git_dirty_files": git_info["git_dirty_files"],
+        "git_commit": initial_git_info["git_commit_short"],
+        "git_commit_full": initial_git_info["git_commit_full"],
+        "git_working_tree_dirty": bool(initial_git_info["git_working_tree_dirty"]),
+        "git_dirty_files": initial_git_info["git_dirty_files"],
         "timestamp_utc": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
         "pytorch_version": torch.__version__,
         "torchvision_version": torchvision.__version__,
@@ -1930,14 +2014,22 @@ def save_provenance_manifest(cfg: CNNExperimentConfig, device: torch.device) -> 
     return manifest_path
 
 
-def run_stage2_cifar10_factorial(cfg: CNNExperimentConfig) -> None:
+def run_stage2_cifar10_factorial(
+    cfg: CNNExperimentConfig, initial_git_info: Optional[Dict[str, Any]] = None
+) -> None:
     cfg.stage = 2
+    if initial_git_info is None:
+        initial_git_info = get_git_provenance()
+    enforce_clean_git_if_requested(cfg, initial_git_info)
+
     configure_reproducibility(cfg.deterministic, warn_only=cfg.deterministic_warn_only)
     s1_report_path = cfg.output_path("stage1_verification_report.json")
-    run_stage1_verification_tests(cfg, save_report_path=s1_report_path)
+    run_stage1_verification_tests(
+        cfg, save_report_path=s1_report_path, initial_git_info=initial_git_info
+    )
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    manifest_path = save_provenance_manifest(cfg, device)
+    manifest_path = save_provenance_manifest(cfg, device, initial_git_info)
     seeds = cfg.active_seeds()
     eval_test = cfg.should_evaluate_test_set(for_stage=2)
 
@@ -1950,6 +2042,7 @@ def run_stage2_cifar10_factorial(cfg: CNNExperimentConfig) -> None:
         f"  cost_domain      = {cfg.cost_domain} | balance_mode = {cfg.balance_mode} | fc_mode = {cfg.fc_balance_mode}\n"
         f"  conv_dropout     = {cfg.conv_dropout_mode} (p_conv={cfg.conv_dropout_rate}, p_fc={cfg.fc_dropout_rate})\n"
         f"  evaluate_test    = {eval_test}\n"
+        f"  git_commit_full  = {initial_git_info['git_commit_full']} (dirty={initial_git_info['git_working_tree_dirty']})\n"
         f"  device           = {device}"
     )
 
@@ -1983,6 +2076,7 @@ def run_stage2_cifar10_factorial(cfg: CNNExperimentConfig) -> None:
                 val_loader=val_loader,
                 test_loader=test_loader,
                 device=device,
+                initial_git_info=initial_git_info,
             )
             all_summaries.append(summary)
             all_curves.extend(curves)
@@ -2034,7 +2128,7 @@ def run_stage2_cifar10_factorial(cfg: CNNExperimentConfig) -> None:
     p_row = inter_df[inter_df["metric"] == primary_endpoint].iloc[0]
     print(
         f"Primary Reported Endpoint ({primary_endpoint}, n={int(p_row['n_seeds'])} seeds, "
-        f"cost_domain={cfg.cost_domain}, balance_mode={cfg.balance_mode}):\n"
+        f"cost_domain={cfg.cost_domain}, balance_mode={cfg.balance_mode}, fc_mode={cfg.fc_balance_mode}):\n"
         f"  Group A (Base):               {p_row['Group_A_mean']*100:6.2f}%\n"
         f"  Group B (Dropout Only):       {p_row['Group_B_mean']*100:6.2f}%\n"
         f"  Group C (Balance Only):       {p_row['Group_C_mean']*100:6.2f}%\n"
@@ -2056,14 +2150,22 @@ def run_stage2_cifar10_factorial(cfg: CNNExperimentConfig) -> None:
     )
 
 
-def run_stage3_controls_and_dropout_sweep(cfg: CNNExperimentConfig) -> None:
+def run_stage3_controls_and_dropout_sweep(
+    cfg: CNNExperimentConfig, initial_git_info: Optional[Dict[str, Any]] = None
+) -> None:
     cfg.stage = 3
+    if initial_git_info is None:
+        initial_git_info = get_git_provenance()
+    enforce_clean_git_if_requested(cfg, initial_git_info)
+
     configure_reproducibility(cfg.deterministic, warn_only=cfg.deterministic_warn_only)
     s1_report_path = cfg.output_path("stage1_verification_report.json")
-    run_stage1_verification_tests(cfg, save_report_path=s1_report_path)
+    run_stage1_verification_tests(
+        cfg, save_report_path=s1_report_path, initial_git_info=initial_git_info
+    )
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    manifest_path = save_provenance_manifest(cfg, device)
+    manifest_path = save_provenance_manifest(cfg, device, initial_git_info)
     seeds = cfg.active_seeds()
     eval_test = cfg.should_evaluate_test_set(for_stage=3)
 
@@ -2074,6 +2176,7 @@ def run_stage3_controls_and_dropout_sweep(cfg: CNNExperimentConfig) -> None:
         f"  output_dir       = {cfg.run_output_dir()}\n"
         f"  seeds            = {seeds} (epochs={cfg.active_epochs()})\n"
         f"  evaluate_test    = {eval_test} (strictly requires --stage3-confirmatory-test-eval)\n"
+        f"  git_commit_full  = {initial_git_info['git_commit_full']} (dirty={initial_git_info['git_working_tree_dirty']})\n"
         f"  device           = {device}"
     )
 
@@ -2089,21 +2192,25 @@ def run_stage3_controls_and_dropout_sweep(cfg: CNNExperimentConfig) -> None:
         print(f"\n--- Stage 3 Controls & Orthogonal 1D Validation Sweeps (Seed {seed}) ---")
         sum_c, _, ref_logs_c = train_and_evaluate_condition(
             cfg, seed, "C_ref", "Group_C_BalanceOnly_Ref", False, "interleaved",
-            train_ds, train_subset_eval_loader, val_loader, test_loader, device
+            train_ds, train_subset_eval_loader, val_loader, test_loader, device,
+            initial_git_info=initial_git_info
         )
         sum_c_rand, _, _ = train_and_evaluate_condition(
             cfg, seed, "C_rand", "Control_NoDrop_RandomRescale", False, "random_rescaled",
             train_ds, train_subset_eval_loader, val_loader, test_loader, device,
+            initial_git_info=initial_git_info,
             reference_epoch_log_lambdas=ref_logs_c
         )
 
         sum_d, _, ref_logs_d = train_and_evaluate_condition(
             cfg, seed, "D_ref", "Group_D_Interaction_Ref", True, "interleaved",
-            train_ds, train_subset_eval_loader, val_loader, test_loader, device
+            train_ds, train_subset_eval_loader, val_loader, test_loader, device,
+            initial_git_info=initial_git_info
         )
         sum_d_rand, _, _ = train_and_evaluate_condition(
             cfg, seed, "D_rand", "Control_Dropout_RandomRescale", True, "random_rescaled",
             train_ds, train_subset_eval_loader, val_loader, test_loader, device,
+            initial_git_info=initial_git_info,
             reference_epoch_log_lambdas=ref_logs_d
         )
         control_rows.extend([sum_c, sum_c_rand, sum_d, sum_d_rand])
@@ -2114,11 +2221,13 @@ def run_stage3_controls_and_dropout_sweep(cfg: CNNExperimentConfig) -> None:
             sum_b_sw, _, _ = train_and_evaluate_condition(
                 cfg, seed, f"B_{tag}", f"Sweep_DropOnly_{tag}", use_d, "none",
                 train_ds, train_subset_eval_loader, val_loader, None, device,
+                initial_git_info=initial_git_info,
                 conv_dropout_override=c_p, fc_dropout_override=cfg.fc_dropout_rate
             )
             sum_d_sw, _, _ = train_and_evaluate_condition(
                 cfg, seed, f"D_{tag}", f"Sweep_DropPlusBal_{tag}", use_d, "interleaved",
                 train_ds, train_subset_eval_loader, val_loader, None, device,
+                initial_git_info=initial_git_info,
                 conv_dropout_override=c_p, fc_dropout_override=cfg.fc_dropout_rate
             )
             sweep_rows.extend([sum_b_sw, sum_d_sw])
@@ -2129,11 +2238,13 @@ def run_stage3_controls_and_dropout_sweep(cfg: CNNExperimentConfig) -> None:
             sum_b_sw, _, _ = train_and_evaluate_condition(
                 cfg, seed, f"B_{tag}", f"Sweep_DropOnly_{tag}", use_d, "none",
                 train_ds, train_subset_eval_loader, val_loader, None, device,
+                initial_git_info=initial_git_info,
                 conv_dropout_override=cfg.conv_dropout_rate, fc_dropout_override=f_p
             )
             sum_d_sw, _, _ = train_and_evaluate_condition(
                 cfg, seed, f"D_{tag}", f"Sweep_DropPlusBal_{tag}", use_d, "interleaved",
                 train_ds, train_subset_eval_loader, val_loader, None, device,
+                initial_git_info=initial_git_info,
                 conv_dropout_override=cfg.conv_dropout_rate, fc_dropout_override=f_p
             )
             sweep_rows.extend([sum_b_sw, sum_d_sw])
@@ -2198,18 +2309,18 @@ def run_stage3_controls_and_dropout_sweep(cfg: CNNExperimentConfig) -> None:
 # =============================================================================
 
 def parse_args() -> CNNExperimentConfig:
-    parser = argparse.ArgumentParser(description="CNN Synaptic Balancing Experiments (Stages 1-3, v1.2.3)")
+    parser = argparse.ArgumentParser(description="CNN Synaptic Balancing Experiments (Stages 1-3, v1.2.4)")
     parser.add_argument("--stage", type=int, default=1, choices=[1, 2, 3],
                         help="1: Verification gate only; 2: CIFAR-10 2x2 factorial; 3: Controls & 1D sweeps")
     parser.add_argument("--mode", type=str, default="smoke", choices=["smoke", "pilot", "full"],
                         help="smoke (seed 42, 5 ep), pilot (seeds 43-47, 60 ep), full (seeds 48-55, 60 ep)")
     parser.add_argument("--cost-domain", type=str, default="parameter",
                         choices=["parameter", "connection_graph"],
-                        help="'parameter' (unique trainable L2) or 'connection_graph' (Sec 8.2 Eq. 8.1)")
-    parser.add_argument("--balance-mode", type=str, default="layer", choices=["layer", "channel"],
-                        help="'layer' (Sec 8.3 whole-layer) or 'channel' (Sec 8.2 per-filter tied subset)")
-    parser.add_argument("--fc-balance-mode", type=str, default="layer", choices=["layer", "neuron"],
-                        help="Balancing granularity for downstream FC hidden layers")
+                        help="'parameter' (unique stored L2) or 'connection_graph' (multiplicity-weighted graph cost)")
+    parser.add_argument("--balance-mode", type=str, default="channel", choices=["channel", "layer"],
+                        help="'channel' (Sec 8.3 first CNN approach, primary) or 'layer' (Sec 8.2 generic tied-layer)")
+    parser.add_argument("--fc-balance-mode", type=str, default="neuron", choices=["neuron", "layer"],
+                        help="'neuron' (per-FC-neuron, primary) or 'layer' (whole-FC-layer)")
     parser.add_argument("--conv-dropout-mode", type=str, default="elementwise",
                         choices=["elementwise", "channel"],
                         help="'elementwise' (B,C,H,W) or 'channel' (Dropout2d B,C,1,1)")
@@ -2226,7 +2337,7 @@ def parse_args() -> CNNExperimentConfig:
     parser.add_argument("--stage3-confirmatory-test-eval", action="store_true",
                         help="Explicitly unlock official test-set evaluation for confirmatory Stage 3 C/D controls")
     parser.add_argument("--require-clean-git", action="store_true",
-                        help="Abort if the git working tree has uncommitted changes")
+                        help="Abort if the git working tree has uncommitted changes at startup")
     parser.add_argument("--save-checkpoints", action="store_true", help="Save final model checkpoints")
     parser.add_argument("--deterministic-warn-only", action="store_true",
                         help="Use warn_only=True instead of strict error mode for deterministic algorithms")
@@ -2258,11 +2369,15 @@ def parse_args() -> CNNExperimentConfig:
 
 
 if __name__ == "__main__":
+    # Capture Git working-tree state ONCE at startup BEFORE any output folders or reports are created
+    startup_git_info = get_git_provenance()
     config = parse_args()
+    enforce_clean_git_if_requested(config, startup_git_info)
+
     if config.stage == 1:
         configure_reproducibility(config.deterministic, warn_only=config.deterministic_warn_only)
-        run_stage1_verification_tests(config)
+        run_stage1_verification_tests(config, initial_git_info=startup_git_info)
     elif config.stage == 2:
-        run_stage2_cifar10_factorial(config)
+        run_stage2_cifar10_factorial(config, initial_git_info=startup_git_info)
     elif config.stage == 3:
-        run_stage3_controls_and_dropout_sweep(config)
+        run_stage3_controls_and_dropout_sweep(config, initial_git_info=startup_git_info)
