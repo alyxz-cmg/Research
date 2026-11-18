@@ -1,3 +1,7 @@
+> **STATUS NOTE (Updated 2026-11-17):** This document (`HandDown.md`) is the **original October 2026 Phase 0–3 planning specification** for the preliminary MNIST ANN-to-SNN conversion study[cite: 5, 7].
+> * **Completed Phase 0–3 MNIST SNN Artifacts:** Implemented in `minimal_experiment_v2.py` (`v2.2.8`), with 1-seed smoke results in `phase3_v2_2_5_minimal_experiment_results.csv` (`seed=42`, 10 epochs)[cite: 8] and 5-seed confirmatory factorial results in `phase3_v2_2_8_minimal_experiment_results.csv`, `phase3_v2_2_8_learning_curves.csv`, and `phase3_v2_2_8_interaction_summary.csv` (`seeds=43–47`, 60 epochs).
+> * **Current Authoritative Handoff (Active CIFAR-10 CNN Study):** See **`HandOff1.md`** and **`cnn_cifar10_experiment.py` (`v1.2.5`)** for the active Convolutional Neural Network (CNN) synaptic balancing study[cite: 7].
+
 # Research Handoff: Synaptic Neural Balance for Neuromorphic Computing
 
 **Purpose:** Give a future agent or research collaborator enough context to continue this project without reconstructing the conversation.

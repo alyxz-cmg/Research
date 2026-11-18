@@ -1,12 +1,14 @@
 #!/usr/bin/env python3
 """
-cnn_cifar10_experiment.py (v1.2.4)
+cnn_cifar10_experiment.py (v1.2.5)
 ==================================
 Staged implementation of Synaptic Neural Balance in Convolutional Neural Networks
-following HandOff1.md and Baldi et al. (2025), Sections 8.2, 8.3, Remark 9.11,
-Section 12.2, and Appendix B.
+following HandOff1.md and Baldi, Alexos, Domingo, & Rahmansetayesh (2025),
+"A Theory of Synaptic Neural Balance: From Local to Global Order",
+Artificial Intelligence, Vol. 346 (2025), Article 104360 (Sections 8.2, 8.3,
+Remark 9.10, Remark 9.11, Section 12.2, and Appendix B).
 
-Theoretical & Methodological Architecture (v1.2.4):
+Theoretical & Methodological Architecture (v1.2.5):
   1. Balancing Granularities (Published Baldi et al. 2025, Sections 8.2 & 8.3):
      - `balance_mode="channel"` paired with `fc_balance_mode="neuron"` (Primary Default,
        Section 8.3 first CNN-specific approach):
@@ -14,9 +16,10 @@ Theoretical & Methodological Architecture (v1.2.4):
        each convolutional feature-map channel (filter) c, with a separate multiplier
        per channel, and independent neuron-wise balancing in the FC hidden layer
        (32 + 64 + 128 + 128 + 256 = 608 balance constraints).
-       (Note: The second Section 8.3 CNN approach—computing distinct candidate factors
-       per spatial neuron followed by averaging kernel weights—alters the network's
-       forward function and is not implemented here.)
+       (Note: The second Section 8.3 CNN approach—computing separate candidate factors
+       per spatial neuron followed by averaging kernel weights—preserves weight sharing
+       via kernel averaging, but is not generally an exact function-preserving
+       transformation and is therefore not implemented here.)
      - `balance_mode="layer"` paired with `fc_balance_mode="layer"` (Coarser Comparison,
        Section 8.2 generic tied-layer balancing):
        Uses one shared scalar multiplier lambda_l > 0 across all channels and spatial
@@ -31,16 +34,16 @@ Theoretical & Methodological Architecture (v1.2.4):
        informed by Baldi et al.'s synaptic balance framework, weighting each shared
        convolutional kernel tap (u,v) by its exact valid non-padded spatial connection
        multiplicity M_l^in(u,v) and bias by H_l * W_l across coordinated Conv+Pool blocks.
-  3. Pre-Creation Git Provenance Snapshot & Fault-Tolerant Stage 1 JSON Report:
+  3. Complete Pre/Post Per-Layer Cost & Log-Multiplier SD Telemetry:
+     - Records `pre_param_sq_cost_<layer>`, `pre_graph_sq_cost_<layer>`,
+       `post_param_sq_cost_<layer>`, and `post_graph_sq_cost_<layer>` for all 6 layers.
+     - Records `log_lambda_mean_<transition>`, `log_lambda_abs_mean_<transition>`, and
+       `log_lambda_sd_<transition>` across all 5 hidden transitions at every epoch.
+  4. Pre-Creation Git Provenance Snapshot & Protected Fault-Tolerant Stage 1 JSON Report:
      - Captures `initial_git_info = get_git_provenance()` at program startup BEFORE
-       creating any output directories or JSON reports, so tracked `results_cnn_cifar10/`
-       files created during the run never falsely trip `--require-clean-git` or mark
-       the run dirty.
-     - Wraps Stage 1 verification in a `try...except...finally` block so that
-       `stage1_verification_report.json` is written to disk on both pass and failure.
-  4. Per-Layer Cost & Scaling Telemetry:
-     - Logs per-layer parameter and connection-graph squared costs (pre- and post-balance)
-       and applied log-multiplier summaries at every epoch in `stage2_learning_curves.csv`.
+       creating any output directories or JSON reports.
+     - Protects the `finally` JSON write in `run_stage1_verification_tests()` with an
+       inner `try...except` so disk I/O errors never mask test assertion exceptions.
 """
 
 import argparse
@@ -49,6 +52,7 @@ import json
 import math
 import os
 import subprocess
+import sys
 import time
 from dataclasses import asdict, dataclass, field
 from typing import Any, Dict, List, Optional, Tuple
@@ -133,7 +137,7 @@ def configure_reproducibility(deterministic: bool = True, warn_only: bool = Fals
 
 @dataclass
 class CNNExperimentConfig:
-    version: str = "1.2.4"
+    version: str = "1.2.5"
     stage: int = 1
     run_mode: str = "smoke"  # "smoke" (seed 42, 5 ep), "pilot" (seeds 43-47, 60 ep), "full" (seeds 48-55, 60 ep)
 
@@ -1175,6 +1179,43 @@ def _brute_force_conv2d_graph_cost_reference(
     return explicit_total, h_out, w_out
 
 
+def build_epoch_telemetry_fields(
+    pre_param_layers: Dict[str, float],
+    pre_graph_layers: Dict[str, float],
+    post_param_layers: Dict[str, float],
+    post_graph_layers: Dict[str, float],
+    applied_step_logs: Optional[List[torch.Tensor]],
+) -> Dict[str, float]:
+    """
+    Constructs the complete per-layer pre/post squared cost dictionary and
+    per-transition log_lambda (mean, abs_mean, sd) telemetry dictionary.
+    """
+    telemetry: Dict[str, float] = {}
+    for l_name in SequentialCIFARCNN.LAYER_NAMES:
+        telemetry[f"pre_param_sq_cost_{l_name}"] = float(pre_param_layers[l_name])
+        telemetry[f"pre_graph_sq_cost_{l_name}"] = float(pre_graph_layers[l_name])
+        telemetry[f"post_param_sq_cost_{l_name}"] = float(post_param_layers[l_name])
+        telemetry[f"post_graph_sq_cost_{l_name}"] = float(post_graph_layers[l_name])
+        # Retain post-balance short aliases for backward compatibility with plotting scripts
+        telemetry[f"param_sq_cost_{l_name}"] = float(post_param_layers[l_name])
+        telemetry[f"graph_sq_cost_{l_name}"] = float(post_graph_layers[l_name])
+
+    for t_idx, t_name in enumerate(SequentialCIFARCNN.TRANSITION_NAMES):
+        if applied_step_logs is not None:
+            log_t = applied_step_logs[t_idx].detach().double()
+            n_u = int(log_t.numel())
+            sd_val = float(log_t.std(unbiased=True).item()) if n_u > 1 else 0.0
+            telemetry[f"log_lambda_mean_{t_name}"] = float(log_t.mean().item())
+            telemetry[f"log_lambda_abs_mean_{t_name}"] = float(log_t.abs().mean().item())
+            telemetry[f"log_lambda_sd_{t_name}"] = sd_val
+        else:
+            telemetry[f"log_lambda_mean_{t_name}"] = 0.0
+            telemetry[f"log_lambda_abs_mean_{t_name}"] = 0.0
+            telemetry[f"log_lambda_sd_{t_name}"] = 0.0
+
+    return telemetry
+
+
 def run_stage1_verification_tests(
     cfg: Optional[CNNExperimentConfig] = None,
     save_report_path: Optional[str] = None,
@@ -1183,7 +1224,7 @@ def run_stage1_verification_tests(
     """
     Executes the 5 mandatory Stage 1 verification unit tests and writes a structured
     JSON verification artifact (`stage1_verification_report.json`) to disk in a
-    `finally` block so that both pass and failure details are preserved.
+    protected `finally` block so that both pass and failure details are preserved.
     """
     if cfg is None:
         cfg = CNNExperimentConfig()
@@ -1193,7 +1234,7 @@ def run_stage1_verification_tests(
     enforce_clean_git_if_requested(cfg, initial_git_info)
 
     print("=" * 86)
-    print("STAGE 1 GATE: MATHEMATICAL FEASIBILITY & NUMERICAL INVARIANCE UNIT TESTS (v1.2.4)")
+    print("STAGE 1 GATE: MATHEMATICAL FEASIBILITY & NUMERICAL INVARIANCE UNIT TESTS (v1.2.5)")
     print("=" * 86)
 
     report: Dict[str, Any] = {
@@ -1208,7 +1249,7 @@ def run_stage1_verification_tests(
         "test2b_monotonic_convergence": [],
         "test3_eligibility_accounting": {},
         "test4_rng_and_policy_checks": {},
-        "test5_statistical_pipeline_checks": {},
+        "test5_statistical_and_telemetry_checks": {},
         "all_passed": False,
         "failed_test": None,
         "error_type": None,
@@ -1590,7 +1631,7 @@ def run_stage1_verification_tests(
             "Strict Stage 3 Test Policy & Config Hash): Verified"
         )
 
-        current_test_section = "Test 5: Stage 2 DiD & Symmetric Stage 3 Contrasts"
+        current_test_section = "Test 5: Stage 2 DiD, Symmetric Stage 3 Contrasts & Pre/Post Telemetry"
         synth_rows = []
         synth_s3_rows = []
         for s_idx, seed in enumerate([43, 44, 45, 46, 47]):
@@ -1625,9 +1666,31 @@ def run_stage1_verification_tests(
                 col_name = f"{prefix}_{suffix}"
                 assert col_name in rep_s3.columns, f"Missing symmetric Stage 3 column: {col_name}"
 
-        report["test5_statistical_pipeline_checks"] = {
+        # Verify complete per-layer pre/post squared cost and log_lambda_sd telemetry helper
+        rng_tel = IsolatedRNGStreams.from_seed(808)
+        net_tel = SequentialCIFARCNN(spatial_size=16, conv_channels=(8, 16, 16, 32), fc_hidden=24).double()
+        net_tel.reset_parameters_with_generator(rng_tel.gen_init)
+        pre_p_tel = compute_per_layer_squared_costs(net_tel, "parameter")
+        pre_g_tel = compute_per_layer_squared_costs(net_tel, "connection_graph")
+        step_logs_tel = partial_balance_cnn_once(net_tel, conv_mode="channel", fc_mode="neuron", cost_domain="parameter")
+        post_p_tel = compute_per_layer_squared_costs(net_tel, "parameter")
+        post_g_tel = compute_per_layer_squared_costs(net_tel, "connection_graph")
+        tel_dict = build_epoch_telemetry_fields(pre_p_tel, pre_g_tel, post_p_tel, post_g_tel, step_logs_tel)
+        for l_name in SequentialCIFARCNN.LAYER_NAMES:
+            assert f"pre_param_sq_cost_{l_name}" in tel_dict
+            assert f"pre_graph_sq_cost_{l_name}" in tel_dict
+            assert f"post_param_sq_cost_{l_name}" in tel_dict
+            assert f"post_graph_sq_cost_{l_name}" in tel_dict
+        for t_name in SequentialCIFARCNN.TRANSITION_NAMES:
+            assert f"log_lambda_mean_{t_name}" in tel_dict
+            assert f"log_lambda_abs_mean_{t_name}" in tel_dict
+            assert f"log_lambda_sd_{t_name}" in tel_dict
+            assert tel_dict[f"log_lambda_sd_{t_name}"] > 0.0, f"Expected non-zero SD for {t_name}"
+
+        report["test5_statistical_and_telemetry_checks"] = {
             "stage2_synthetic_did_pp": float(row_acc["interaction_DiD_mean"] * 100.0),
             "stage3_synthetic_delta_interaction_pp": float(row_s3["delta_interaction_mean"] * 100.0),
+            "telemetry_fields_verified": len(tel_dict),
         }
         report["all_passed"] = True
 
@@ -1639,18 +1702,23 @@ def run_stage1_verification_tests(
         raise
 
     finally:
-        if save_report_path is None:
-            os.makedirs(cfg.output_root, exist_ok=True)
-            save_report_path = os.path.join(cfg.output_root, "stage1_verification_report.json")
-        else:
-            os.makedirs(os.path.dirname(os.path.abspath(save_report_path)), exist_ok=True)
-        with open(save_report_path, "w", encoding="utf-8") as f:
-            json.dump(report, f, indent=2)
+        try:
+            if save_report_path is None:
+                os.makedirs(cfg.output_root, exist_ok=True)
+                save_report_path = os.path.join(cfg.output_root, "stage1_verification_report.json")
+            else:
+                os.makedirs(os.path.dirname(os.path.abspath(save_report_path)), exist_ok=True)
+            with open(save_report_path, "w", encoding="utf-8") as f:
+                json.dump(report, f, indent=2)
+        except Exception as io_exc:
+            print(
+                f"[WARNING] Failed to write Stage 1 JSON report to {save_report_path}: {io_exc}",
+                file=sys.stderr,
+            )
 
     print(
-        f"[PASS] Test 5 (Stage 2 DiD & Symmetric Stage 3 Contrasts): Verified Stage 2 DiD = "
-        f"{row_acc['interaction_DiD_mean']*100:+.3f} pp and Stage 3 delta_interaction = "
-        f"{row_s3['delta_interaction_mean']*100:+.3f} pp\n"
+        f"[PASS] Test 5 (Stage 2 DiD, Symmetric Stage 3 Contrasts & Pre/Post/SD Telemetry): "
+        f"Verified ({len(tel_dict)} telemetry columns)\n"
         f"       Saved Stage 1 verification report to: {save_report_path}"
     )
     print("=" * 86)
@@ -1763,9 +1831,11 @@ def train_and_evaluate_condition(
                 epoch_train_correct += int((logits.argmax(dim=1) == yb).sum().item())
                 epoch_train_samples += int(yb.numel())
 
-        # Capture pre-balance squared costs right after the epoch's SGD updates
-        pre_bal_param_total = compute_total_l2_regularizer(model, cost_domain="parameter")
-        pre_bal_graph_total = compute_total_l2_regularizer(model, cost_domain="connection_graph")
+        # Capture per-layer pre-balance squared costs right after the epoch's SGD updates
+        pre_param_layers = compute_per_layer_squared_costs(model, cost_domain="parameter")
+        pre_graph_layers = compute_per_layer_squared_costs(model, cost_domain="connection_graph")
+        pre_bal_param_total = float(sum(pre_param_layers.values()))
+        pre_bal_graph_total = float(sum(pre_graph_layers.values()))
 
         t_bal0 = time.perf_counter()
         applied_step_logs: Optional[List[torch.Tensor]] = None
@@ -1845,20 +1915,11 @@ def train_and_evaluate_condition(
             "eligible_fraction": float(diag["eligible_fraction"]),
         }
 
-        # Per-layer post-balance squared costs and applied log_lambda summaries
-        for l_name in SequentialCIFARCNN.LAYER_NAMES:
-            row_dict[f"param_sq_cost_{l_name}"] = float(post_param_layers[l_name])
-            row_dict[f"graph_sq_cost_{l_name}"] = float(post_graph_layers[l_name])
-
-        for t_idx, t_name in enumerate(SequentialCIFARCNN.TRANSITION_NAMES):
-            if applied_step_logs is not None:
-                log_t = applied_step_logs[t_idx]
-                row_dict[f"log_lambda_mean_{t_name}"] = float(log_t.mean().item())
-                row_dict[f"log_lambda_abs_mean_{t_name}"] = float(log_t.abs().mean().item())
-            else:
-                row_dict[f"log_lambda_mean_{t_name}"] = 0.0
-                row_dict[f"log_lambda_abs_mean_{t_name}"] = 0.0
-
+        row_dict.update(
+            build_epoch_telemetry_fields(
+                pre_param_layers, pre_graph_layers, post_param_layers, post_graph_layers, applied_step_logs
+            )
+        )
         curve_rows.append(row_dict)
 
     total_train_sec = time.perf_counter() - t_start
@@ -2309,7 +2370,7 @@ def run_stage3_controls_and_dropout_sweep(
 # =============================================================================
 
 def parse_args() -> CNNExperimentConfig:
-    parser = argparse.ArgumentParser(description="CNN Synaptic Balancing Experiments (Stages 1-3, v1.2.4)")
+    parser = argparse.ArgumentParser(description="CNN Synaptic Balancing Experiments (Stages 1-3, v1.2.5)")
     parser.add_argument("--stage", type=int, default=1, choices=[1, 2, 3],
                         help="1: Verification gate only; 2: CIFAR-10 2x2 factorial; 3: Controls & 1D sweeps")
     parser.add_argument("--mode", type=str, default="smoke", choices=["smoke", "pilot", "full"],
