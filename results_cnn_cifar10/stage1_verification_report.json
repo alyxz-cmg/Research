@@ -1,0 +1,154 @@
+{
+  "script_version": "1.2.5",
+  "source_script_sha256": "3f4ab168240a2f088b0e57dfa8730ebed1bacfd991bca5b326f434ea9b6a3157",
+  "config_fingerprint": "483c4fb4bd",
+  "git_provenance": {
+    "git_commit_short": "af1c60a",
+    "git_commit_full": "af1c60ab0e14e463e470f28c715ae92af8befec0",
+    "git_working_tree_dirty": false,
+    "git_dirty_files": []
+  },
+  "timestamp_utc": "2026-11-18T00:42:29Z",
+  "test1a_logit_invariance": [
+    {
+      "cost_domain": "parameter",
+      "conv_mode": "layer",
+      "fc_mode": "layer",
+      "f64_partial_max_diff": 6.217248937900877e-15,
+      "f64_full_max_diff": 6.8833827526759706e-15,
+      "f32_full_max_diff": 5.7220458984375e-06,
+      "f64_iterations": 64,
+      "f32_iterations": 32
+    },
+    {
+      "cost_domain": "parameter",
+      "conv_mode": "layer",
+      "fc_mode": "neuron",
+      "f64_partial_max_diff": 4.884981308350689e-15,
+      "f64_full_max_diff": 6.217248937900877e-15,
+      "f32_full_max_diff": 6.198883056640625e-06,
+      "f64_iterations": 60,
+      "f32_iterations": 33
+    },
+    {
+      "cost_domain": "parameter",
+      "conv_mode": "channel",
+      "fc_mode": "layer",
+      "f64_partial_max_diff": 5.329070518200751e-15,
+      "f64_full_max_diff": 6.217248937900877e-15,
+      "f32_full_max_diff": 6.4373016357421875e-06,
+      "f64_iterations": 64,
+      "f32_iterations": 32
+    },
+    {
+      "cost_domain": "parameter",
+      "conv_mode": "channel",
+      "fc_mode": "neuron",
+      "f64_partial_max_diff": 5.10702591327572e-15,
+      "f64_full_max_diff": 6.5503158452884236e-15,
+      "f32_full_max_diff": 5.4836273193359375e-06,
+      "f64_iterations": 61,
+      "f32_iterations": 33
+    },
+    {
+      "cost_domain": "connection_graph",
+      "conv_mode": "layer",
+      "fc_mode": "layer",
+      "f64_partial_max_diff": 4.884981308350689e-15,
+      "f64_full_max_diff": 2.4868995751603507e-14,
+      "f32_full_max_diff": 4.76837158203125e-06,
+      "f64_iterations": 80,
+      "f32_iterations": 42
+    },
+    {
+      "cost_domain": "connection_graph",
+      "conv_mode": "layer",
+      "fc_mode": "neuron",
+      "f64_partial_max_diff": 4.218847493575595e-15,
+      "f64_full_max_diff": 1.4210854715202004e-14,
+      "f32_full_max_diff": 6.67572021484375e-06,
+      "f64_iterations": 80,
+      "f32_iterations": 42
+    },
+    {
+      "cost_domain": "connection_graph",
+      "conv_mode": "channel",
+      "fc_mode": "layer",
+      "f64_partial_max_diff": 4.551914400963142e-15,
+      "f64_full_max_diff": 2.1316282072803006e-14,
+      "f32_full_max_diff": 5.245208740234375e-06,
+      "f64_iterations": 80,
+      "f32_iterations": 42
+    },
+    {
+      "cost_domain": "connection_graph",
+      "conv_mode": "channel",
+      "fc_mode": "neuron",
+      "f64_partial_max_diff": 4.218847493575595e-15,
+      "f64_full_max_diff": 2.531308496145357e-14,
+      "f32_full_max_diff": 6.854534149169922e-06,
+      "f64_iterations": 80,
+      "f32_iterations": 42
+    }
+  ],
+  "test1b_active_dropout_invariance_max_diff": 1.5987211554602254e-14,
+  "test2a_per_transition_multiplier_diffs": {
+    "conv1_to_conv2": 0.002075145194049735,
+    "conv2_pool_to_conv3": 0.3686633916816217,
+    "conv3_to_conv4": 0.18216146701266503,
+    "conv4_pool_to_fc1": 1.088352760949571,
+    "fc1_to_fc2": 0.5438212957664239
+  },
+  "test2b_monotonic_convergence": [
+    {
+      "cost_domain": "parameter",
+      "balance_mode": "layer",
+      "r_initial": 13149.984128301348,
+      "r_final": 189.42248922468622,
+      "final_max_deficit": 8.72194252823732e-11
+    },
+    {
+      "cost_domain": "parameter",
+      "balance_mode": "channel",
+      "r_initial": 13149.984128301348,
+      "r_final": 186.0569174127591,
+      "final_max_deficit": 9.009795479977834e-11
+    },
+    {
+      "cost_domain": "connection_graph",
+      "balance_mode": "layer",
+      "r_initial": 569933.6028813123,
+      "r_final": 4394.965635766734,
+      "final_max_deficit": 8.23288580887298e-11
+    },
+    {
+      "cost_domain": "connection_graph",
+      "balance_mode": "channel",
+      "r_initial": 569933.6028813123,
+      "r_final": 4317.344300904168,
+      "final_max_deficit": 8.290221715647999e-11
+    }
+  ],
+  "test3_eligibility_accounting": {
+    "n_total_units": 96,
+    "n_zero_cost_excluded": 2,
+    "n_near_zero_excluded": 1
+  },
+  "test4_rng_and_policy_checks": {
+    "tested_devices": [
+      "cpu",
+      "cuda"
+    ],
+    "stage3_generic_override_blocked": true,
+    "seed_tiers_disjoint": true
+  },
+  "test5_statistical_and_telemetry_checks": {
+    "stage2_synthetic_did_pp": 1.7000000000000015,
+    "stage3_synthetic_delta_interaction_pp": 1.8000000000000016,
+    "telemetry_fields_verified": 51
+  },
+  "all_passed": true,
+  "failed_test": null,
+  "error_type": null,
+  "error_message": null
+}
