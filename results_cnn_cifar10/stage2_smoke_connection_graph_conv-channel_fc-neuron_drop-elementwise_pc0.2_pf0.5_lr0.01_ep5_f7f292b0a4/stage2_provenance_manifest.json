@@ -1,0 +1,103 @@
+{
+  "script_version": "1.2.5",
+  "source_script_sha256": "3f4ab168240a2f088b0e57dfa8730ebed1bacfd991bca5b326f434ea9b6a3157",
+  "stage": 2,
+  "config_fingerprint": "f7f292b0a4",
+  "run_tag": "stage2_smoke_connection_graph_conv-channel_fc-neuron_drop-elementwise_pc0.2_pf0.5_lr0.01_ep5_f7f292b0a4",
+  "git_commit": "0ea6175",
+  "git_commit_full": "0ea617589a3bda8f65d6c5a1ed8dcecc15376490",
+  "git_working_tree_dirty": false,
+  "git_dirty_files": [],
+  "timestamp_utc": "2026-11-18T00:43:45Z",
+  "pytorch_version": "2.5.1+cu121",
+  "torchvision_version": "0.20.1+cu121",
+  "device": "cuda",
+  "deterministic_enabled": true,
+  "deterministic_warn_only": false,
+  "deterministic_strict": true,
+  "test_set_evaluated": false,
+  "active_seeds": [
+    42
+  ],
+  "active_epochs": 5,
+  "config": {
+    "version": "1.2.5",
+    "stage": 2,
+    "run_mode": "smoke",
+    "cost_domain": "connection_graph",
+    "balance_mode": "channel",
+    "fc_balance_mode": "neuron",
+    "smoke_seeds": [
+      42
+    ],
+    "pilot_seeds": [
+      43,
+      44,
+      45,
+      46,
+      47
+    ],
+    "full_seeds": [
+      48,
+      49,
+      50,
+      51,
+      52,
+      53,
+      54,
+      55
+    ],
+    "data_dir": "./data",
+    "split_seed": 20261117,
+    "train_size": 45000,
+    "val_size": 5000,
+    "train_subset_eval_size": 5000,
+    "batch_size": 128,
+    "use_augmentation": true,
+    "aug_padding": 4,
+    "aug_pad_mode": "reflect",
+    "conv_channels": [
+      32,
+      64,
+      128,
+      128
+    ],
+    "fc_hidden": 256,
+    "num_classes": 10,
+    "conv_dropout_mode": "elementwise",
+    "conv_dropout_rate": 0.2,
+    "fc_dropout_rate": 0.5,
+    "learning_rate": 0.01,
+    "weight_decay": 0.0,
+    "epochs_smoke": 5,
+    "epochs_main": 60,
+    "deterministic": true,
+    "deterministic_warn_only": false,
+    "allow_nonconfirmatory_test_eval": false,
+    "stage3_confirmatory_test_eval": false,
+    "require_clean_git": true,
+    "save_checkpoints": false,
+    "balance_eps": 1e-12,
+    "full_balance_max_iters": 300,
+    "full_balance_tol_f64": 1e-10,
+    "full_balance_tol_f32": 1e-05,
+    "logit_tol_f64": 1e-12,
+    "logit_tol_f32": 1e-05,
+    "graph_ref_tol_f64": 1e-09,
+    "conv_dropout_sweep_1d": [
+      0.0,
+      0.1,
+      0.2,
+      0.3,
+      0.4
+    ],
+    "fc_dropout_sweep_1d": [
+      0.0,
+      0.25,
+      0.5,
+      0.65,
+      0.8
+    ],
+    "output_root": "./results_cnn_cifar10"
+  }
+}
